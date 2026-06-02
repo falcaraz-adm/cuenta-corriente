@@ -33,6 +33,19 @@ C_INFO    = "#0095FF"
 C_BORDER  = "#2D3348"
 C_MUTED   = "#6B7280"
 
+COUNTRY_THEMES = {
+    "TODOS":      {"primary": "#6C63FF", "secondary": "#4B4899", "flag": "🌎", "name": "Todos"},
+    "GUATEMALA":  {"primary": "#4B9CD3", "secondary": "#0F4C81", "flag": "🇬🇹", "name": "Guatemala"},
+    "ARGENTINA":  {"primary": "#74ACDF", "secondary": "#003087", "flag": "🇦🇷", "name": "Argentina"},
+    "URUGUAY":    {"primary": "#5BA4CF", "secondary": "#002868", "flag": "🇺🇾", "name": "Uruguay"},
+    "CHILE":      {"primary": "#D52B1E", "secondary": "#003087", "flag": "🇨🇱", "name": "Chile"},
+    "PARAGUAY":   {"primary": "#0038A8", "secondary": "#D52B1E", "flag": "🇵🇾", "name": "Paraguay"},
+    "BOLIVIA":    {"primary": "#007A3D", "secondary": "#D52B1E", "flag": "🇧🇴", "name": "Bolivia"},
+    "AXT":        {"primary": "#6C63FF", "secondary": "#4B4899", "flag": "🏢", "name": "AXT"},
+    "CANOA":      {"primary": "#00D68F", "secondary": "#007A4D", "flag": "🏢", "name": "Canoa"},
+    "NAVEGANTES": {"primary": "#0095FF", "secondary": "#0060B0", "flag": "🏢", "name": "Navegantes"},
+}
+
 # ── CSS global ────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -168,9 +181,12 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
 # PROVEEDORES
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _render_proveedores():
+def _render_proveedores(pais_sel="TODOS", theme_color="#4B9CD3"):
     hoy = datetime.date.today()
     df  = get_proveedores_cc()
+
+    if pais_sel != "TODOS" and not df.empty and "pais" in df.columns:
+        df = df[df["pais"] == pais_sel].copy()
 
     if df.empty:
         df_calc = pd.DataFrame()
@@ -203,7 +219,7 @@ def _render_proveedores():
     total_pag  = df_pag_mes["monto_local"].sum() if not df_pag_mes.empty else 0
 
     c1, c2, c3, c4 = st.columns(4)
-    _kpi_card(c1, "Total Pendiente",  "Q " + f"{total_pend:,.2f}", str(len(df_pend))    + " facturas", "#FAFAFA")
+    _kpi_card(c1, "Total Pendiente",  "Q " + f"{total_pend:,.2f}", str(len(df_pend))    + " facturas", theme_color)
     _kpi_card(c2, "Vencidas",         "Q " + f"{total_venc:,.2f}", str(len(df_venc))    + " facturas", C_DANGER)
     _kpi_card(c3, "Por Vencer (7d)",  "Q " + f"{total_pv7:,.2f}",  str(len(df_pv7))     + " facturas", C_WARNING)
     _kpi_card(c4, "Pagadas este mes", "Q " + f"{total_pag:,.2f}",  str(len(df_pag_mes)) + " pagos",    C_SUCCESS)
@@ -567,9 +583,12 @@ def _prov_editar(df, hoy):
 # CLIENTES
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _render_clientes():
+def _render_clientes(pais_sel="TODOS", theme_color="#4B9CD3"):
     hoy = datetime.date.today()
     df  = get_clientes_cc()
+
+    if pais_sel != "TODOS" and not df.empty and "pais" in df.columns:
+        df = df[df["pais"] == pais_sel].copy()
 
     if df.empty:
         df_calc = pd.DataFrame()
@@ -602,7 +621,7 @@ def _render_clientes():
     total_cob  = df_cob_mes["monto_local"].sum() if not df_cob_mes.empty else 0
 
     c1, c2, c3, c4 = st.columns(4)
-    _kpi_card(c1, "Por Cobrar",        "Q " + f"{total_pend:,.2f}", str(len(df_pend))    + " facturas", "#FAFAFA")
+    _kpi_card(c1, "Por Cobrar",        "Q " + f"{total_pend:,.2f}", str(len(df_pend))    + " facturas", theme_color)
     _kpi_card(c2, "Vencidas",          "Q " + f"{total_venc:,.2f}", str(len(df_venc))    + " facturas", C_DANGER)
     _kpi_card(c3, "Por Vencer (7d)",   "Q " + f"{total_pv7:,.2f}",  str(len(df_pv7))     + " facturas", C_WARNING)
     _kpi_card(c4, "Cobradas este mes", "Q " + f"{total_cob:,.2f}",  str(len(df_cob_mes)) + " cobros",   C_SUCCESS)
@@ -912,9 +931,40 @@ def _cli_editar(df, hoy):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def main():
-    st.markdown("## 🏦 Cuenta Corriente")
+    pais_opciones = ["TODOS"] + PAISES
+    pais_sel = st.sidebar.selectbox(
+        "🌎 País / Empresa",
+        pais_opciones,
+        index=pais_opciones.index("GUATEMALA"),
+        key="pais_filtro_global"
+    )
+
+    theme  = COUNTRY_THEMES.get(pais_sel, COUNTRY_THEMES["TODOS"])
+    color  = theme["primary"]
+    color2 = theme["secondary"]
+    flag   = theme["flag"]
+
+    st.markdown(f"""
+    <style>
+    ::-webkit-scrollbar-thumb:hover {{ background: {color} !important; }}
+    .stTabs [data-baseweb="tab-highlight"] {{ background-color: {color} !important; }}
+    .stTabs [aria-selected="true"] {{ color: {color} !important; }}
+    div[data-testid="stSidebar"] .stSelectbox label {{ color: {color} !important; font-weight: 700; }}
+    </style>
+    """, unsafe_allow_html=True)
+
     st.markdown(
-        "<p style='color:#A0A4B8;font-size:.85rem;margin-top:-.5rem;margin-bottom:1rem;'>"
+        f"<div style='background:linear-gradient(90deg,{color} 0%,{color2} 100%);"
+        "border-radius:10px;padding:.5rem 1.2rem;margin-bottom:.8rem;"
+        "display:flex;align-items:center;gap:.7rem;'>"
+        f"<span style='font-size:1.8rem;'>{flag}</span>"
+        f"<span style='color:#fff;font-size:1.4rem;font-weight:800;letter-spacing:-.5px;'>Cuenta Corriente</span>"
+        f"<span style='color:#ffffff99;font-size:.85rem;margin-left:auto;'>{theme['name']}</span>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        "<p style='color:#A0A4B8;font-size:.85rem;margin-top:-.3rem;margin-bottom:1rem;'>"
         "Seguimiento de facturas de proveedores y clientes — pendientes, vencidas y pagadas/cobradas."
         "</p>",
         unsafe_allow_html=True
@@ -922,9 +972,9 @@ def main():
 
     tab_prov, tab_cli = st.tabs(["🏢 Proveedores", "👥 Clientes"])
     with tab_prov:
-        _render_proveedores()
+        _render_proveedores(pais_sel, color)
     with tab_cli:
-        _render_clientes()
+        _render_clientes(pais_sel, color)
 
 
 if __name__ == "__main__":
