@@ -932,39 +932,58 @@ def _cli_editar(df, hoy):
 
 def main():
     pais_opciones = ["TODOS"] + PAISES
-    pais_sel = st.sidebar.selectbox(
-        "🌎 País / Empresa",
-        pais_opciones,
-        index=pais_opciones.index("GUATEMALA"),
-        key="pais_filtro_global"
-    )
+
+    # Selector en el cuerpo principal (fila superior)
+    col_flag, col_sel = st.columns([3, 1])
+
+    with col_sel:
+        pais_sel = st.selectbox(
+            "🌎 País",
+            pais_opciones,
+            index=pais_opciones.index("GUATEMALA"),
+            key="pais_filtro_global",
+            label_visibility="collapsed",
+        )
 
     theme  = COUNTRY_THEMES.get(pais_sel, COUNTRY_THEMES["TODOS"])
     color  = theme["primary"]
     color2 = theme["secondary"]
     flag   = theme["flag"]
 
+    # CSS dinámico: fondo, tabs, scrollbar
     st.markdown(f"""
     <style>
+    .stApp {{
+        background: linear-gradient(160deg, {color2}33 0%, #0E1117 40%) !important;
+    }}
+    section[data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, {color2}55 0%, #0E1117 100%) !important;
+    }}
+    ::-webkit-scrollbar-thumb {{ background: {color}88; }}
     ::-webkit-scrollbar-thumb:hover {{ background: {color} !important; }}
     .stTabs [data-baseweb="tab-highlight"] {{ background-color: {color} !important; }}
     .stTabs [aria-selected="true"] {{ color: {color} !important; }}
-    div[data-testid="stSidebar"] .stSelectbox label {{ color: {color} !important; font-weight: 700; }}
+    div[data-testid="metric-container"] {{
+        border-color: {color}44 !important;
+        box-shadow: 0 0 12px {color}22 !important;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
+    with col_flag:
+        st.markdown(
+            f"<div style='background:linear-gradient(90deg,{color} 0%,{color2} 100%);"
+            "border-radius:10px;padding:.45rem 1.2rem;"
+            "display:flex;align-items:center;gap:.7rem;'>"
+            f"<span style='font-size:1.7rem;'>{flag}</span>"
+            f"<span style='color:#fff;font-size:1.35rem;font-weight:800;letter-spacing:-.5px;'>Cuenta Corriente</span>"
+            f"<span style='color:#ffffff99;font-size:.82rem;margin-left:auto;'>{theme['name']}</span>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
     st.markdown(
-        f"<div style='background:linear-gradient(90deg,{color} 0%,{color2} 100%);"
-        "border-radius:10px;padding:.5rem 1.2rem;margin-bottom:.8rem;"
-        "display:flex;align-items:center;gap:.7rem;'>"
-        f"<span style='font-size:1.8rem;'>{flag}</span>"
-        f"<span style='color:#fff;font-size:1.4rem;font-weight:800;letter-spacing:-.5px;'>Cuenta Corriente</span>"
-        f"<span style='color:#ffffff99;font-size:.85rem;margin-left:auto;'>{theme['name']}</span>"
-        "</div>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        "<p style='color:#A0A4B8;font-size:.85rem;margin-top:-.3rem;margin-bottom:1rem;'>"
+        "<p style='color:#A0A4B8;font-size:.85rem;margin-top:.3rem;margin-bottom:1rem;'>"
         "Seguimiento de facturas de proveedores y clientes — pendientes, vencidas y pagadas/cobradas."
         "</p>",
         unsafe_allow_html=True
