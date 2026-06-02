@@ -1143,9 +1143,59 @@ Si usás Gmail, generá una **App Password** en myaccount.google.com → Segurid
     dias_crit = st.session_state.get("alerta_dias_crit", 0)
     dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
 
+    # ── Datos de ejemplo para preview/test ───────────────────────────────────
+    hoy_ts = pd.Timestamp(hoy)
+    _demo = pd.DataFrame([
+        {"cliente": "UNICEF Guatemala",       "numero_factura": "GT-2026-APR-02", "monto_local": 11750.0,
+         "fecha_emision": hoy_ts - pd.Timedelta(days=22), "fecha_vencimiento": hoy_ts - pd.Timedelta(days=18),
+         "estado": "PENDIENTE", "observaciones": "Segundo período consecutivo con retraso"},
+        {"cliente": "Special Olympics Chile", "numero_factura": "CL-2026-APR-01", "monto_local": 22170.0,
+         "fecha_emision": hoy_ts - pd.Timedelta(days=22), "fecha_vencimiento": hoy_ts - pd.Timedelta(days=18),
+         "estado": "PENDIENTE", "observaciones": "Supera umbral de política de cobro"},
+        {"cliente": "UNICEF Paraguay",        "numero_factura": "PY-2026-MAY-01", "monto_local": 248000.0,
+         "fecha_emision": hoy_ts - pd.Timedelta(days=10), "fecha_vencimiento": hoy_ts + pd.Timedelta(days=4),
+         "estado": "PENDIENTE", "observaciones": "Mayor factura del período activo"},
+        {"cliente": "UNICEF Bolivia",         "numero_factura": "BO-2026-MAY-01", "monto_local": 58000.0,
+         "fecha_emision": hoy_ts - pd.Timedelta(days=10), "fecha_vencimiento": hoy_ts + pd.Timedelta(days=4),
+         "estado": "PENDIENTE", "observaciones": ""},
+    ])
+    _demo["_alerta_est"]  = [_estado_alerta(r, hoy, dias_prev, dias_crit)[0] for _, r in _demo.iterrows()]
+    _demo["_alerta_dias"] = [_estado_alerta(r, hoy, dias_prev, dias_crit)[1] for _, r in _demo.iterrows()]
+    _demo_crit = _demo[_demo["_alerta_est"] == "CRITICA"]
+    _demo_prev = _demo[_demo["_alerta_est"] == "PREVENTIVA"]
+    _demo_resumen = {
+        "total_pend": _demo["monto_local"].sum(),
+        "n_criticas": len(_demo_crit),
+        "n_prev":     len(_demo_prev),
+    }
+
+    # ── Botones preview / test email ──────────────────────────────────────────
+    col_prev, col_test, _ = st.columns([1, 1, 2])
+    with col_prev:
+        mostrar_preview = st.toggle("👁 Ver preview email", key="toggle_preview_email")
+    with col_test:
+        if st.button("📧 Enviar email de prueba", key="btn_test_email"):
+            dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
+            if not dests:
+                st.error("Agregá al menos un destinatario.")
+            else:
+                html_test = _generar_html_email(_demo_crit, _demo_prev, _demo_resumen)
+                with st.spinner("Enviando email de prueba..."):
+                    ok, msg = _enviar_email(html_test, dests)
+                if ok:
+                    st.success(f"✅ Email de prueba enviado a: {', '.join(dests)}")
+                else:
+                    st.error(f"❌ {msg}")
+
+    if mostrar_preview:
+        html_preview = _generar_html_email(_demo_crit, _demo_prev, _demo_resumen)
+        with st.expander("📄 Vista previa del email (datos de ejemplo)", expanded=True):
+            st.components.v1.html(html_preview, height=650, scrolling=True)
+        st.markdown("")
+
     # ── Calcular estados ─────────────────────────────────────────────────────
     if df.empty:
-        st.info("No hay facturas de clientes registradas para mostrar alertas.")
+        st.info("💡 No hay facturas cargadas aún. El preview de arriba muestra cómo se verá cuando haya datos.")
         return
 
     resultados = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
