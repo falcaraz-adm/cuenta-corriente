@@ -1138,10 +1138,10 @@ from_address  = "tu@email.com"
 ```
 Si usás Gmail, generá una **App Password** en myaccount.google.com → Seguridad → Contraseñas de aplicación.
             """)
-    else:
-        dias_prev = st.session_state.get("alerta_dias_prev", 5)
-        dias_crit = st.session_state.get("alerta_dias_crit", 0)
-        dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
+
+    dias_prev = st.session_state.get("alerta_dias_prev", 5)
+    dias_crit = st.session_state.get("alerta_dias_crit", 0)
+    dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
 
     # ── Calcular estados ─────────────────────────────────────────────────────
     if df.empty:
