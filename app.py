@@ -933,6 +933,359 @@ def _cli_editar(df, hoy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# ALERTAS & COBRANZA
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _estado_alerta(row, hoy, dias_prev, dias_crit):
+    """Devuelve (estado, dias) donde estado = CRITICA|PREVENTIVA|VIGENTE|COBRADA"""
+    if row.get("estado") == "COBRADA":
+        return "COBRADA", 0
+    fv = row.get("fecha_vencimiento")
+    if not pd.notna(fv):
+        return "VIGENTE", 0
+    dias_al_venc = (pd.Timestamp(fv).date() - hoy).days
+    if dias_al_venc < -dias_crit:
+        return "CRITICA", abs(dias_al_venc)
+    elif dias_al_venc <= dias_prev:
+        return "PREVENTIVA", dias_al_venc
+    return "VIGENTE", dias_al_venc
+
+
+def _generar_html_email(df_crit, df_prev, resumen):
+    mes  = datetime.date.today().strftime("%B %Y")
+    fecha_str = datetime.date.today().strftime("%d/%m/%Y")
+
+    def _tabla_rows(df_in):
+        rows = ""
+        for _, r in df_in.iterrows():
+            rows += (
+                "<tr style='border-bottom:1px solid #eee;'>"
+                f"<td style='padding:7px 8px;'>{_safe(r.get('cliente'))}</td>"
+                f"<td style='padding:7px 8px;text-align:center;'>{_fmt_date(r.get('fecha_emision'))}</td>"
+                f"<td style='padding:7px 8px;text-align:center;'>{_fmt_date(r.get('fecha_vencimiento'))}</td>"
+                f"<td style='padding:7px 8px;text-align:right;font-weight:700;'>Q {float(r.get('monto_local') or 0):,.2f}</td>"
+                f"<td style='padding:7px 8px;text-align:center;'>{_safe(r.get('numero_factura')) or 'S/N'}</td>"
+                "</tr>"
+            )
+        return rows
+
+    seccion_crit = ""
+    if not df_crit.empty:
+        seccion_crit = f"""
+        <h3 style="color:#C62828;font-size:.82rem;text-transform:uppercase;
+            border-bottom:2px solid #ffcdd2;padding-bottom:5px;margin-top:24px;">
+            🔴 Vencidas — Requieren acción inmediata ({len(df_crit)})
+        </h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.82rem;">
+            <thead><tr style="background:#ffebee;color:#555;font-size:.75rem;">
+                <th style="padding:7px 8px;text-align:left;">Cliente</th>
+                <th style="padding:7px 8px;">F. Emisión</th>
+                <th style="padding:7px 8px;">Vencimiento</th>
+                <th style="padding:7px 8px;text-align:right;">Monto</th>
+                <th style="padding:7px 8px;">N° Factura</th>
+            </tr></thead>
+            <tbody>{_tabla_rows(df_crit)}</tbody>
+        </table>
+        <p style="font-size:.78rem;color:#C62828;margin-top:6px;">
+            Requiere acción inmediata. Se solicita confirmación de Dirección para iniciar gestión de cobro.
+        </p>"""
+
+    seccion_prev = ""
+    if not df_prev.empty:
+        seccion_prev = f"""
+        <h3 style="color:#E65100;font-size:.82rem;text-transform:uppercase;
+            border-bottom:2px solid #ffe0b2;padding-bottom:5px;margin-top:24px;">
+            ⚠️ Próximas a vencer — Acción preventiva ({len(df_prev)})
+        </h3>
+        <table style="width:100%;border-collapse:collapse;font-size:.82rem;">
+            <thead><tr style="background:#fff8e1;color:#555;font-size:.75rem;">
+                <th style="padding:7px 8px;text-align:left;">Cliente</th>
+                <th style="padding:7px 8px;">F. Emisión</th>
+                <th style="padding:7px 8px;">Vencimiento</th>
+                <th style="padding:7px 8px;text-align:right;">Monto</th>
+                <th style="padding:7px 8px;">N° Factura</th>
+            </tr></thead>
+            <tbody>{_tabla_rows(df_prev)}</tbody>
+        </table>"""
+
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;margin:0;">
+    <div style="max-width:680px;margin:0 auto;background:white;border-radius:10px;
+        overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.1);">
+        <div style="background:linear-gradient(90deg,#0F4C81 0%,#4B9CD3 100%);padding:20px 28px;">
+            <div style="font-size:1.1rem;font-weight:800;color:white;">🏦 Cuenta Corriente — PROA Consulting</div>
+            <div style="font-size:.82rem;color:rgba(255,255,255,.75);margin-top:3px;">
+                Informe de cobranza · Corte {fecha_str}
+            </div>
+        </div>
+        <div style="padding:24px 28px;">
+            <p style="color:#333;margin-top:0;">Dirección,</p>
+            <p style="color:#555;font-size:.88rem;">
+                Se adjunta el estado de cuentas corrientes al día de la fecha.
+                A continuación el detalle del período.
+            </p>
+            <div style="display:flex;gap:12px;margin:20px 0;">
+                <div style="flex:1;background:#f0f4ff;border-radius:6px;padding:14px;text-align:center;">
+                    <div style="font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;">Pendiente total</div>
+                    <div style="font-size:1.3rem;font-weight:800;color:#1565C0;">Q {resumen['total_pend']:,.2f}</div>
+                </div>
+                <div style="flex:1;background:#fff3f3;border-radius:6px;padding:14px;text-align:center;">
+                    <div style="font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;">Críticas</div>
+                    <div style="font-size:1.3rem;font-weight:800;color:#C62828;">{resumen['n_criticas']}</div>
+                </div>
+                <div style="flex:1;background:#fffde7;border-radius:6px;padding:14px;text-align:center;">
+                    <div style="font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;">Preventivas</div>
+                    <div style="font-size:1.3rem;font-weight:800;color:#E65100;">{resumen['n_prev']}</div>
+                </div>
+            </div>
+            {seccion_crit}
+            {seccion_prev}
+            <p style="font-size:.72rem;color:#aaa;border-top:1px solid #eee;
+                padding-top:14px;margin-top:24px;margin-bottom:0;">
+                Generado automáticamente por el sistema de Cuenta Corriente · PROA Consulting · {fecha_str}
+            </p>
+        </div>
+    </div>
+    </body></html>"""
+
+
+def _enviar_email(html_content, destinatarios):
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    try:
+        cfg = st.secrets.get("email", {})
+        if not cfg:
+            return False, (
+                "No hay configuración de email. Agregá en Streamlit Cloud → Settings → Secrets:\n"
+                "[email]\nsmtp_server = \"smtp.gmail.com\"\nsmtp_port = 587\n"
+                "username = \"tu@email.com\"\npassword = \"tu_app_password\""
+            )
+        smtp_server = cfg.get("smtp_server", "smtp.gmail.com")
+        smtp_port   = int(cfg.get("smtp_port", 587))
+        username    = cfg.get("username", "")
+        password    = cfg.get("password", "")
+        from_addr   = cfg.get("from_address", username)
+        if not username or not password:
+            return False, "Falta username o password en la sección [email] de Secrets."
+        mes = datetime.date.today().strftime("%B %Y")
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"Informe Cuentas Corrientes — {mes}"
+        msg["From"]    = from_addr
+        msg["To"]      = ", ".join(destinatarios)
+        msg.attach(MIMEText(html_content, "html", "utf-8"))
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(username, password)
+            server.sendmail(from_addr, destinatarios, msg.as_string())
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+
+def _render_alertas(pais_sel, theme_color):
+    hoy = datetime.date.today()
+    df  = get_clientes_cc()
+    if not df.empty and pais_sel != "TODOS" and "pais" in df.columns:
+        df = df[df["pais"] == pais_sel].copy()
+
+    # ── Configuración ────────────────────────────────────────────────────────
+    with st.expander("⚙️ Configuración de alertas y destinatarios", expanded=False):
+        st.markdown("**Timeline de alertas**")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            dias_prev = st.number_input(
+                "Días antes del vencimiento → aviso preventivo",
+                min_value=0, max_value=90,
+                value=st.session_state.get("alerta_dias_prev", 5),
+                key="alerta_dias_prev_w"
+            )
+            st.session_state["alerta_dias_prev"] = dias_prev
+        with cc2:
+            dias_crit = st.number_input(
+                "Días DESPUÉS del vencimiento → alarma crítica",
+                min_value=0, max_value=90,
+                value=st.session_state.get("alerta_dias_crit", 0),
+                help="0 = crítica desde el mismo día del vencimiento",
+                key="alerta_dias_crit_w"
+            )
+            st.session_state["alerta_dias_crit"] = dias_crit
+
+        st.markdown("")
+        st.markdown("**📧 Destinatarios del informe** (uno por línea)")
+        dest_text = st.text_area(
+            "Destinatarios",
+            value=st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar"),
+            height=90,
+            key="alerta_dest_w",
+            label_visibility="collapsed",
+            placeholder="correo1@empresa.com\ncorreo2@empresa.com"
+        )
+        st.session_state["alerta_destinatarios"] = dest_text
+
+        # Instrucciones email
+        with st.expander("🔧 Configurar envío de email (SMTP)", expanded=False):
+            st.markdown("""
+Para habilitar el envío real de emails, agregá esto en **Streamlit Cloud → Settings → Secrets**:
+```toml
+[email]
+smtp_server   = "smtp.gmail.com"
+smtp_port     = 587
+username      = "tu@email.com"
+password      = "tu_app_password"
+from_address  = "tu@email.com"
+```
+Si usás Gmail, generá una **App Password** en myaccount.google.com → Seguridad → Contraseñas de aplicación.
+            """)
+    else:
+        dias_prev = st.session_state.get("alerta_dias_prev", 5)
+        dias_crit = st.session_state.get("alerta_dias_crit", 0)
+        dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
+
+    # ── Calcular estados ─────────────────────────────────────────────────────
+    if df.empty:
+        st.info("No hay facturas de clientes registradas para mostrar alertas.")
+        return
+
+    resultados = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
+    df["_alerta_est"]  = [r[0] for r in resultados]
+    df["_alerta_dias"] = [r[1] for r in resultados]
+
+    df_crit = df[df["_alerta_est"] == "CRITICA"].sort_values("_alerta_dias", ascending=False)
+    df_prev = df[df["_alerta_est"] == "PREVENTIVA"].sort_values("_alerta_dias")
+    df_cob  = df[df["_alerta_est"] == "COBRADA"]
+
+    total_pend = df[df["_alerta_est"].isin(["CRITICA","PREVENTIVA","VIGENTE"])]["monto_local"].sum()
+    total_crit = df_crit["monto_local"].sum() if not df_crit.empty else 0
+
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    _kpi_card(c1, "Críticas sin cobrar",  str(len(df_crit)),    f"Q {total_crit:,.2f}",   C_DANGER)
+    _kpi_card(c2, "Pendiente total",      f"Q {total_pend:,.2f}", f"{len(df_crit)+len(df_prev)} alertas", C_WARNING)
+    _kpi_card(c3, "Alertas preventivas",  str(len(df_prev)),    "próximas a vencer",      theme_color)
+    _kpi_card(c4, "Cobradas",             str(len(df_cob)),     f"Q {df_cob['monto_local'].sum() if not df_cob.empty else 0:,.2f}", C_SUCCESS)
+
+    st.markdown("")
+
+    # ── Timeline visual ───────────────────────────────────────────────────────
+    st.markdown(
+        f"<div style='background:#1A1F2E;border:1px solid #2D3348;border-radius:10px;"
+        "padding:.8rem 1.4rem;margin-bottom:1rem;display:flex;align-items:center;gap:0;'>"
+        "<div style='flex:1;text-align:center;font-size:.72rem;color:#6B7280;'>📄 Fecha factura<br><b style='color:#A0A4B8;'>Día 0</b></div>"
+        "<div style='flex:2;height:4px;background:linear-gradient(90deg,#2D3348,#2D3348);border-radius:2px;position:relative;'>"
+        f"<div style='position:absolute;top:-18px;left:{min(dias_prev*5,70)}%;font-size:.65rem;color:{theme_color};white-space:nowrap;'>Día {dias_prev} →</div>"
+        f"<div style='position:absolute;top:0;left:{min(dias_prev*5,70)}%;width:10px;height:10px;background:{theme_color};"
+        "border-radius:50%;transform:translate(-50%,-3px);'></div>"
+        "</div>"
+        f"<div style='flex:1;text-align:center;font-size:.72rem;color:{theme_color};'>"
+        f"⚠️ Aviso preventivo<br><b>Día {dias_prev}</b></div>"
+        "<div style='flex:2;height:4px;background:linear-gradient(90deg,#2D3348,#2D3348);border-radius:2px;'></div>"
+        f"<div style='flex:1;text-align:center;font-size:.72rem;color:{C_DANGER};'>"
+        f"🔴 Alarma crítica<br><b>Día {dias_crit} post-venc.</b></div>"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    # ── Críticas ──────────────────────────────────────────────────────────────
+    if not df_crit.empty:
+        st.markdown(
+            f"<div style='color:{C_DANGER};font-weight:700;font-size:.78rem;letter-spacing:1px;"
+            "text-transform:uppercase;margin:.8rem 0 .4rem;'>🚨 Requiere atención inmediata</div>",
+            unsafe_allow_html=True
+        )
+        for _, row in df_crit.iterrows():
+            mora  = int(row["_alerta_dias"])
+            monto = float(row.get("monto_local") or 0)
+            fac   = _safe(row.get("numero_factura")) or "S/N"
+            obs   = _safe(row.get("observaciones"))
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,{C_DANGER}15 0%,#1A1F2E 100%);"
+                f"border-left:4px solid {C_DANGER};border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;'>"
+                "<div style='flex:1;'>"
+                f"<div style='font-weight:700;color:#FAFAFA;font-size:.95rem;'>"
+                f"Factura vencida hace {mora} día{'s' if mora!=1 else ''} — {_safe(row.get('cliente'))}</div>"
+                f"<div style='font-size:.75rem;color:#A0A4B8;margin-top:3px;'>"
+                f"<b>{fac}</b> · Q {monto:,.2f} · Vencía: <b>{_fmt_date(row.get('fecha_vencimiento'))}</b>"
+                + (f" · 📝 {obs}" if obs else "") + "</div>"
+                f"<div style='margin-top:5px;'>"
+                f"<span style='background:{C_DANGER}25;color:{C_DANGER};font-size:.7rem;font-weight:700;"
+                f"padding:2px 10px;border-radius:12px;border:1px solid {C_DANGER}44;'>🔴 Crítico · {mora}d mora</span>"
+                "</div></div>"
+                f"<div style='font-weight:800;color:{C_DANGER};font-size:1rem;white-space:nowrap;'>Q {monto:,.2f}</div>"
+                "</div></div>",
+                unsafe_allow_html=True
+            )
+
+    # ── Preventivas ───────────────────────────────────────────────────────────
+    if not df_prev.empty:
+        st.markdown(
+            f"<div style='color:{C_WARNING};font-weight:700;font-size:.78rem;letter-spacing:1px;"
+            "text-transform:uppercase;margin:1rem 0 .4rem;'>⚠️ Preventivas — Próximos vencimientos</div>",
+            unsafe_allow_html=True
+        )
+        for _, row in df_prev.iterrows():
+            dias_r = int(row["_alerta_dias"])
+            monto  = float(row.get("monto_local") or 0)
+            fac    = _safe(row.get("numero_factura")) or "S/N"
+            label  = "vence hoy" if dias_r == 0 else (f"vence en {dias_r} día{'s' if dias_r!=1 else ''}" if dias_r > 0 else f"venció hace {abs(dias_r)}d")
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,{C_WARNING}12 0%,#1A1F2E 100%);"
+                f"border-left:4px solid {C_WARNING};border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;'>"
+                "<div style='flex:1;'>"
+                f"<div style='font-weight:700;color:#FAFAFA;font-size:.95rem;'>"
+                f"{_safe(row.get('cliente'))} — {label}</div>"
+                f"<div style='font-size:.75rem;color:#A0A4B8;margin-top:3px;'>"
+                f"<b>{fac}</b> · Q {monto:,.2f} · Venc: <b>{_fmt_date(row.get('fecha_vencimiento'))}</b></div>"
+                f"<div style='margin-top:5px;'>"
+                f"<span style='background:{C_WARNING}25;color:{C_WARNING};font-size:.7rem;font-weight:700;"
+                f"padding:2px 10px;border-radius:12px;border:1px solid {C_WARNING}44;'>⚠️ Preventiva</span>"
+                "</div></div>"
+                f"<div style='font-weight:800;color:{C_WARNING};font-size:1rem;white-space:nowrap;'>Q {monto:,.2f}</div>"
+                "</div></div>",
+                unsafe_allow_html=True
+            )
+
+    if df_crit.empty and df_prev.empty:
+        st.markdown(
+            f"<div style='background:{C_SUCCESS}12;border:1px solid {C_SUCCESS}44;border-radius:10px;"
+            "padding:1.5rem;text-align:center;margin-top:1rem;'>"
+            "<div style='font-size:2rem;'>✅</div>"
+            f"<div style='color:{C_SUCCESS};font-weight:700;font-size:1rem;'>Todo al día — sin alertas activas</div>"
+            "<div style='color:#A0A4B8;font-size:.8rem;margin-top:4px;'>No hay facturas críticas ni preventivas pendientes.</div>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+        return
+
+    # ── Email ─────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    col_btn, col_info = st.columns([1, 2])
+    with col_btn:
+        if st.button("📧 Enviar informe por email", type="primary", use_container_width=True, key="btn_email_alertas"):
+            destinatarios = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
+            if not destinatarios:
+                st.error("Agregá al menos un destinatario en la configuración.")
+            else:
+                html_email = _generar_html_email(df_crit, df_prev, {
+                    "total_pend": total_pend,
+                    "n_criticas": len(df_crit),
+                    "n_prev":     len(df_prev),
+                })
+                with st.spinner("Enviando..."):
+                    ok, msg = _enviar_email(html_email, destinatarios)
+                if ok:
+                    st.success(f"✅ Informe enviado a: {', '.join(destinatarios)}")
+                else:
+                    st.error(f"❌ {msg}")
+    with col_info:
+        dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
+        st.caption("📧 Destinatarios: " + " · ".join(dests) if dests else "Sin destinatarios configurados")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1032,11 +1385,13 @@ def main():
         unsafe_allow_html=True
     )
 
-    tab_prov, tab_cli = st.tabs(["🏢 Proveedores", "👥 Clientes"])
+    tab_prov, tab_cli, tab_alertas = st.tabs(["🏢 Proveedores", "👥 Clientes", "🔔 Alertas & Cobranza"])
     with tab_prov:
         _render_proveedores(pais_sel, color)
     with tab_cli:
         _render_clientes(pais_sel, color)
+    with tab_alertas:
+        _render_alertas(pais_sel, color)
 
 
 if __name__ == "__main__":
