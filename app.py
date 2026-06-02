@@ -281,6 +281,7 @@ def _prov_seguimiento(df, hoy):
     st.markdown("<small style='color:#A0A4B8;'>" + str(len(df_v)) + " registro(s)</small>", unsafe_allow_html=True)
     st.markdown("")
 
+    tc = st.session_state.get("tc", "#4B9CD3")
     for _, row in df_v.iterrows():
         ev     = row["_ev"]
         border = _border_color(ev)
@@ -306,8 +307,10 @@ def _prov_seguimiento(df, hoy):
             obs_html = "<div style='font-size:.72rem;color:#A0A4B8;margin-top:2px;'>📝 " + obs + "</div>"
 
         html = (
-            "<div style='background:#1A1F2E;border-left:4px solid " + border + ";"
-            "border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.5rem;'>"
+            "<div style='background:linear-gradient(135deg," + tc + "12 0%,#1A1F2E 100%);"
+            "border-left:4px solid " + border + ";"
+            "border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.5rem;"
+            "box-shadow:0 2px 8px " + tc + "18;'>"
             "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
             "  <div style='flex:4;min-width:0;'>"
             "    <div style='font-weight:700;font-size:.95rem;color:#FAFAFA;'>"
@@ -682,6 +685,7 @@ def _cli_seguimiento(df, hoy):
     st.markdown("<small style='color:#A0A4B8;'>" + str(len(df_v)) + " registro(s)</small>", unsafe_allow_html=True)
     st.markdown("")
 
+    tc = st.session_state.get("tc", "#4B9CD3")
     for _, row in df_v.iterrows():
         ev     = row["_ev"]
         border = _border_color(ev)
@@ -702,8 +706,10 @@ def _cli_seguimiento(df, hoy):
             obs_html = "<div style='font-size:.72rem;color:#A0A4B8;margin-top:2px;'>📝 " + obs + "</div>"
 
         html = (
-            "<div style='background:#1A1F2E;border-left:4px solid " + border + ";"
-            "border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.5rem;'>"
+            "<div style='background:linear-gradient(135deg," + tc + "12 0%,#1A1F2E 100%);"
+            "border-left:4px solid " + border + ";"
+            "border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.5rem;"
+            "box-shadow:0 2px 8px " + tc + "18;'>"
             "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
             "  <div style='flex:4;min-width:0;'>"
             "    <div style='font-weight:700;font-size:.95rem;color:#FAFAFA;'>"
@@ -933,9 +939,7 @@ def _cli_editar(df, hoy):
 def main():
     pais_opciones = ["TODOS"] + PAISES
 
-    # Selector en el cuerpo principal (fila superior)
     col_flag, col_sel = st.columns([3, 1])
-
     with col_sel:
         pais_sel = st.selectbox(
             "🌎 País",
@@ -950,22 +954,60 @@ def main():
     color2 = theme["secondary"]
     flag   = theme["flag"]
 
-    # CSS dinámico: fondo, tabs, scrollbar
+    # Guardar en session_state para usarlos dentro de las tarjetas
+    st.session_state["tc"]  = color
+    st.session_state["tc2"] = color2
+
     st.markdown(f"""
     <style>
+    /* Fondo general */
     .stApp {{
-        background: linear-gradient(160deg, {color2}33 0%, #0E1117 40%) !important;
+        background: linear-gradient(145deg, {color2}55 0%, #080D14 45%, #0E1117 100%) !important;
     }}
+    /* Sidebar */
     section[data-testid="stSidebar"] {{
-        background: linear-gradient(180deg, {color2}55 0%, #0E1117 100%) !important;
+        background: linear-gradient(180deg, {color2}77 0%, #080D14 100%) !important;
+        border-right: 1px solid {color}33 !important;
     }}
-    ::-webkit-scrollbar-thumb {{ background: {color}88; }}
+    /* Scrollbar */
+    ::-webkit-scrollbar-thumb {{ background: {color}99; border-radius: 4px; }}
     ::-webkit-scrollbar-thumb:hover {{ background: {color} !important; }}
+    /* Tabs */
     .stTabs [data-baseweb="tab-highlight"] {{ background-color: {color} !important; }}
-    .stTabs [aria-selected="true"] {{ color: {color} !important; }}
+    .stTabs [aria-selected="true"] {{ color: {color} !important; font-weight: 700 !important; }}
+    .stTabs [data-baseweb="tab-list"] {{ border-bottom: 1px solid {color}33 !important; }}
+    /* KPI metric cards */
     div[data-testid="metric-container"] {{
+        background: linear-gradient(135deg, {color}20 0%, {color2}15 100%) !important;
+        border: 1px solid {color}55 !important;
+        box-shadow: 0 4px 20px {color}25 !important;
+    }}
+    /* Botones primarios */
+    .stButton > button[kind="primary"] {{
+        background: linear-gradient(90deg, {color} 0%, {color2} 100%) !important;
+        border: none !important;
+        color: white !important;
+        font-weight: 700 !important;
+    }}
+    .stButton > button[kind="primary"]:hover {{
+        opacity: 0.88 !important;
+        transform: translateY(-1px);
+    }}
+    /* Inputs y selects */
+    div[data-baseweb="select"] > div:first-child {{
+        border-color: {color}66 !important;
+        background: {color}0D !important;
+    }}
+    div[data-baseweb="input"] > div {{
         border-color: {color}44 !important;
-        box-shadow: 0 0 12px {color}22 !important;
+        background: {color}0D !important;
+    }}
+    /* Divisor */
+    hr {{ border-color: {color}33 !important; }}
+    /* Radio tabs superiores */
+    div[data-testid="stHorizontalBlock"] div[role="radiogroup"] label[data-selected="true"] {{
+        color: {color} !important;
+        border-bottom: 2px solid {color} !important;
     }}
     </style>
     """, unsafe_allow_html=True)
@@ -973,17 +1015,18 @@ def main():
     with col_flag:
         st.markdown(
             f"<div style='background:linear-gradient(90deg,{color} 0%,{color2} 100%);"
-            "border-radius:10px;padding:.45rem 1.2rem;"
-            "display:flex;align-items:center;gap:.7rem;'>"
-            f"<span style='font-size:1.7rem;'>{flag}</span>"
-            f"<span style='color:#fff;font-size:1.35rem;font-weight:800;letter-spacing:-.5px;'>Cuenta Corriente</span>"
+            "border-radius:10px;padding:.5rem 1.4rem;"
+            "display:flex;align-items:center;gap:.8rem;"
+            f"box-shadow:0 4px 20px {color}55;'>"
+            f"<span style='font-size:2rem;'>{flag}</span>"
+            f"<span style='color:#fff;font-size:1.4rem;font-weight:800;letter-spacing:-.5px;'>Cuenta Corriente</span>"
             f"<span style='color:#ffffff99;font-size:.82rem;margin-left:auto;'>{theme['name']}</span>"
             "</div>",
             unsafe_allow_html=True
         )
 
     st.markdown(
-        "<p style='color:#A0A4B8;font-size:.85rem;margin-top:.3rem;margin-bottom:1rem;'>"
+        f"<p style='color:{color}99;font-size:.85rem;margin-top:.4rem;margin-bottom:1rem;'>"
         "Seguimiento de facturas de proveedores y clientes — pendientes, vencidas y pagadas/cobradas."
         "</p>",
         unsafe_allow_html=True
