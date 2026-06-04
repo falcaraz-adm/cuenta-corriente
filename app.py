@@ -522,11 +522,83 @@ def _prov_registrar_pago(df, hoy):
         unsafe_allow_html=True
     )
 
+    # ── OCR comprobante ───────────────────────────────────────────────────────
+    st.markdown("**📸 Subí el comprobante y la IA completa los datos del pago**")
+    comp_file = st.file_uploader(
+        "Comprobante bancario (PDF, foto JPG/PNG)",
+        type=["pdf", "jpg", "jpeg", "png"],
+        key="prov_comp_upload"
+    )
+
+    ocr_pago = st.session_state.get("prov_ocr_pago", {})
+
+    if comp_file:
+        if st.button("🤖 Leer comprobante con IA", key="prov_comp_ocr_btn", type="primary"):
+            with st.spinner("Leyendo comprobante..."):
+                prompt_comp = (
+                    "Analizá este comprobante de pago bancario y extraé en JSON:\n"
+                    '{"monto_pagado": 0.00, "fecha_pago": "YYYY-MM-DD", '
+                    '"numero_transferencia": "código o referencia", '
+                    '"banco_origen": "nombre banco", "banco_destino": "nombre banco"}\n'
+                    "Si un dato no aparece usá null. Respondé SOLO con el JSON."
+                )
+                file_bytes = comp_file.read()
+                import anthropic as _ant, base64 as _b64, json as _json, re as _re
+                try:
+                    _key = st.secrets.get("anthropic", {}).get("api_key", "")
+                    if _key:
+                        _cli = _ant.Anthropic(api_key=_key)
+                        _ext = comp_file.name.lower().rsplit(".", 1)[-1]
+                        if _ext == "pdf":
+                            _txt = _extract_pdf_text(file_bytes)
+                            _resp = _cli.messages.create(
+                                model="claude-haiku-4-5-20251001", max_tokens=400,
+                                messages=[{"role": "user", "content": f"{prompt_comp}\n\nTexto:\n{_txt}"}]
+                            )
+                        else:
+                            _mt = {"jpg":"image/jpeg","jpeg":"image/jpeg","png":"image/png"}.get(_ext,"image/jpeg")
+                            _resp = _cli.messages.create(
+                                model="claude-haiku-4-5-20251001", max_tokens=400,
+                                messages=[{"role":"user","content":[
+                                    {"type":"image","source":{"type":"base64","media_type":_mt,"data":_b64.standard_b64encode(file_bytes).decode()}},
+                                    {"type":"text","text":prompt_comp}
+                                ]}]
+                            )
+                        _raw = _resp.content[0].text.strip()
+                        _m = _re.search(r'\{.*\}', _raw, _re.DOTALL)
+                        if _m:
+                            st.session_state["prov_ocr_pago"] = _json.loads(_m.group())
+                            ocr_pago = st.session_state["prov_ocr_pago"]
+                            st.success("✅ Comprobante leído.")
+                            st.rerun()
+                        else:
+                            st.warning("No se pudieron extraer datos. Completá manualmente.")
+                    else:
+                        st.warning("Falta API key de Anthropic en Secrets.")
+                except Exception as _e:
+                    st.warning(f"OCR no disponible: {_e}. Completá manualmente.")
+
+    if ocr_pago:
+        with st.expander("📋 Datos del comprobante", expanded=True):
+            cx1, cx2, cx3 = st.columns(3)
+            cx1.metric("Monto pagado", f"Q {ocr_pago.get('monto_pagado') or 0:,.2f}")
+            cx2.metric("Fecha", ocr_pago.get("fecha_pago") or "—")
+            cx3.metric("N° Transferencia", ocr_pago.get("numero_transferencia") or "—")
+
+    # Defaults desde OCR
+    _def_fecha_pago = datetime.date.today()
+    if ocr_pago.get("fecha_pago"):
+        try:
+            _def_fecha_pago = pd.Timestamp(ocr_pago["fecha_pago"]).date()
+        except Exception:
+            pass
+    _def_nro = _safe(ocr_pago.get("numero_transferencia", ""))
+
     c1, c2 = st.columns(2)
     with c1:
-        fecha_pago   = st.date_input("Fecha de pago *", value=datetime.date.today(), key="prov_fecha_pago")
+        fecha_pago   = st.date_input("Fecha de pago *", value=_def_fecha_pago, key="prov_fecha_pago")
     with c2:
-        nro_transfer = st.text_input("N° Transferencia / Referencia *", placeholder="TRF-2026-00123", key="prov_nro_transfer")
+        nro_transfer = st.text_input("N° Transferencia / Referencia *", value=_def_nro, placeholder="TRF-2026-00123", key="prov_nro_transfer")
 
     num_fac_now = ""
     if ev == "SIN_FACTURA":
@@ -534,19 +606,7 @@ def _prov_registrar_pago(df, hoy):
         st.markdown("**📄 ¿Ya llegó la factura? Podés asociarla ahora:**")
         num_fac_now = st.text_input("N° de Factura", key="prov_num_fac_pago")
 
-    st.markdown("---")
-    st.markdown("**📎 Comprobante bancario PDF — opcional**")
-    pdf_file = st.file_uploader("Subir PDF del comprobante", type=["pdf"], key="prov_pdf_upload")
-
-    comprobante_nombre = ""
-    if pdf_file is not None:
-        comprobante_nombre = pdf_file.name
-        texto = _extract_pdf_text(pdf_file.read())
-        if texto:
-            with st.expander("📄 Texto extraído del PDF"):
-                st.text(texto[:1200])
-        else:
-            st.caption("📎 " + comprobante_nombre + " adjunto.")
+    comprobante_nombre = comp_file.name if comp_file else ""
 
     st.markdown("")
     if st.button("✅ Confirmar Pago", type="primary", use_container_width=True, key="prov_confirm_pago"):
@@ -565,6 +625,7 @@ def _prov_registrar_pago(df, hoy):
                 update_data["tiene_factura"]  = True
             ok = update_proveedor_cc(int(row["id"]), update_data)
             if ok:
+                st.session_state.pop("prov_ocr_pago", None)
                 st.success("✅ Pago registrado. Transferencia: **" + nro_transfer.strip().upper() + "**")
                 st.rerun()
             else:
@@ -942,11 +1003,50 @@ def _cli_registrar_cobro(df, hoy):
         unsafe_allow_html=True
     )
 
+    st.markdown("**📸 Subí el comprobante de cobro y la IA completa los datos**")
+    comp_cli = st.file_uploader(
+        "Comprobante (PDF, foto JPG/PNG)",
+        type=["pdf", "jpg", "jpeg", "png"],
+        key="cli_comp_upload"
+    )
+    ocr_cobro = st.session_state.get("cli_ocr_cobro", {})
+
+    if comp_cli:
+        if st.button("🤖 Leer comprobante con IA", key="cli_comp_ocr_btn", type="primary"):
+            with st.spinner("Leyendo comprobante..."):
+                res_cobro = _ocr_factura_ia(comp_cli.read(), comp_cli.name)
+                if "error" not in res_cobro:
+                    mapped = {
+                        "monto_pagado":         res_cobro.get("monto"),
+                        "fecha_pago":           res_cobro.get("fecha_emision") or res_cobro.get("fecha_vencimiento"),
+                        "numero_transferencia": res_cobro.get("numero_factura"),
+                    }
+                    st.session_state["cli_ocr_cobro"] = mapped
+                    ocr_cobro = mapped
+                    st.success("✅ Comprobante leído.")
+                    st.rerun()
+                else:
+                    st.warning(f"OCR: {res_cobro['error']}")
+
+    if ocr_cobro:
+        with st.expander("📋 Datos del comprobante", expanded=True):
+            cy1, cy2 = st.columns(2)
+            cy1.metric("Fecha", ocr_cobro.get("fecha_pago") or "—")
+            cy2.metric("Referencia", ocr_cobro.get("numero_transferencia") or "—")
+
+    _def_fc = datetime.date.today()
+    if ocr_cobro.get("fecha_pago"):
+        try:
+            _def_fc = pd.Timestamp(ocr_cobro["fecha_pago"]).date()
+        except Exception:
+            pass
+    _def_ref = _safe(ocr_cobro.get("numero_transferencia", ""))
+
     c1, c2 = st.columns(2)
     with c1:
-        fecha_cobro = st.date_input("Fecha de cobro *", value=datetime.date.today(), key="cli_fecha_cobro")
+        fecha_cobro = st.date_input("Fecha de cobro *", value=_def_fc, key="cli_fecha_cobro")
     with c2:
-        nro_ref = st.text_input("N° Referencia / Transferencia", placeholder="TRF-2026-00456", key="cli_nro_ref")
+        nro_ref = st.text_input("N° Referencia / Transferencia", value=_def_ref, placeholder="TRF-2026-00456", key="cli_nro_ref")
 
     if st.button("✅ Confirmar Cobro", type="primary", use_container_width=True, key="cli_confirm_cobro"):
         ok = update_cliente_cc(int(row["id"]), {
@@ -955,6 +1055,7 @@ def _cli_registrar_cobro(df, hoy):
             "numero_referencia": nro_ref.strip().upper() or None,
         })
         if ok:
+            st.session_state.pop("cli_ocr_cobro", None)
             st.success("✅ Cobro registrado para **" + _safe(row.get("cliente")) + "** — Q " + f"{monto_sel:,.2f}")
             st.rerun()
         else:
