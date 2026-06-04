@@ -177,7 +177,11 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
-def _ocr_factura_ia(file_bytes: bytes, filename: str) -> dict:
+def _ocr_factura_ia(file_bytes: bytes, filename: str, tipo: str = "proveedor") -> dict:
+    """
+    tipo="proveedor": extrae el EMISOR (quien nos factura a nosotros)
+    tipo="cliente":   extrae el RECEPTOR (a quien nosotros le facturamos)
+    """
     try:
         api_key = st.secrets.get("anthropic", {}).get("api_key", "")
         if not api_key:
@@ -185,22 +189,41 @@ def _ocr_factura_ia(file_bytes: bytes, filename: str) -> dict:
         import anthropic, base64, json, re
         client_ai = anthropic.Anthropic(api_key=api_key)
         ext = filename.lower().rsplit(".", 1)[-1]
-        prompt = (
-            "Esta factura fue RECIBIDA por AGENCIA PROA GUATEMALA (es el receptor/comprador). "
-            "Necesito los datos del EMISOR (quien envía la factura, el proveedor), NO de PROA Guatemala.\n\n"
-            "Extraé en JSON con estas claves exactas:\n"
-            '{"nombre": "nombre completo del EMISOR/proveedor (quien emite, no PROA)", '
-            '"numero_factura": "número de DTE o serie-número de autorización", '
-            '"monto": 0.00, '
-            '"moneda": "GTQ", '
-            '"fecha_emision": "YYYY-MM-DD", '
-            '"fecha_vencimiento": "YYYY-MM-DD o null si no aparece explícitamente", '
-            '"descripcion": "descripción breve del servicio o producto"}\n\n'
-            "Importante: el campo 'nombre' debe ser el PROVEEDOR que cobra (ej: '3B SOLUCIONES EMPRESARIALES' "
-            "o 'ALTERNATIVAS FINANCIERAS CM'), nunca AGENCIA PROA GUATEMALA.\n"
-            "Si fecha_vencimiento no aparece en la factura, usá null.\n"
-            "Respondé SOLO con el JSON válido, sin texto adicional."
-        )
+
+        if tipo == "cliente":
+            prompt = (
+                "Esta factura fue EMITIDA por AGENCIA PROA GUATEMALA a un cliente. "
+                "Necesito los datos del RECEPTOR/CLIENTE (a quien se le factura), NO de PROA Guatemala.\n\n"
+                "Extraé en JSON con estas claves exactas:\n"
+                '{"nombre": "nombre completo del RECEPTOR/CLIENTE (a quien le facturamos)", '
+                '"numero_factura": "número de DTE o serie-número (ej: 8CBE8603-3426042350)", '
+                '"monto": 0.00, '
+                '"moneda": "GTQ", '
+                '"fecha_emision": "YYYY-MM-DD", '
+                '"fecha_vencimiento": "YYYY-MM-DD o null si no aparece explícitamente", '
+                '"descripcion": "descripción breve del servicio"}\n\n'
+                "Importante: 'nombre' debe ser el CLIENTE que nos debe pagar "
+                "(ej: 'ASOCIACION ALDEAS INFANTILES SOS DE GUATEMALA'), nunca AGENCIA PROA GUATEMALA.\n"
+                "Si fecha_vencimiento no aparece, usá null.\n"
+                "Respondé SOLO con el JSON válido, sin texto adicional."
+            )
+        else:
+            prompt = (
+                "Esta factura fue RECIBIDA por AGENCIA PROA GUATEMALA (es el receptor/comprador). "
+                "Necesito los datos del EMISOR (quien envía la factura, el proveedor), NO de PROA Guatemala.\n\n"
+                "Extraé en JSON con estas claves exactas:\n"
+                '{"nombre": "nombre completo del EMISOR/proveedor (quien emite, no PROA)", '
+                '"numero_factura": "número de DTE o serie-número de autorización", '
+                '"monto": 0.00, '
+                '"moneda": "GTQ", '
+                '"fecha_emision": "YYYY-MM-DD", '
+                '"fecha_vencimiento": "YYYY-MM-DD o null si no aparece explícitamente", '
+                '"descripcion": "descripción breve del servicio o producto"}\n\n'
+                "Importante: 'nombre' debe ser el PROVEEDOR que cobra "
+                "(ej: '3B SOLUCIONES EMPRESARIALES' o 'ALTERNATIVAS FINANCIERAS CM'), nunca AGENCIA PROA GUATEMALA.\n"
+                "Si fecha_vencimiento no aparece, usá null.\n"
+                "Respondé SOLO con el JSON válido, sin texto adicional."
+            )
         if ext == "pdf":
             texto = _extract_pdf_text(file_bytes)
             if texto:
@@ -894,7 +917,7 @@ def _cli_nueva_factura():
         if archivo_cli:
             if st.button("🤖 Procesar con IA", key="cli_ocr_btn", type="primary"):
                 with st.spinner("Leyendo factura con IA..."):
-                    res_cli = _ocr_factura_ia(archivo_cli.read(), archivo_cli.name)
+                    res_cli = _ocr_factura_ia(archivo_cli.read(), archivo_cli.name, tipo="cliente")
                 if "error" in res_cli:
                     st.error(f"❌ {res_cli['error']}")
                 else:
@@ -1509,12 +1532,6 @@ Si usás Gmail, generá una **App Password** en myaccount.google.com → Segurid
                     st.success(f"✅ Email de prueba enviado a: {', '.join(dests)}")
                 else:
                     st.error(f"❌ {msg}")
-
-    if mostrar_preview:
-        html_preview = _generar_html_email(_demo_crit, _demo_prev, _demo_resumen)
-        with st.expander("📄 Vista previa del email (datos de ejemplo)", expanded=True):
-            st.components.v1.html(html_preview, height=650, scrolling=True)
-        st.markdown("")
 
     if mostrar_preview:
         html_prev = _generar_html_email(df_crit_r, df_prev_r, resumen_real_c)
