@@ -177,6 +177,55 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
+def _ocr_factura_ia(file_bytes: bytes, filename: str) -> dict:
+    try:
+        api_key = st.secrets.get("anthropic", {}).get("api_key", "")
+        if not api_key:
+            return {"error": "Falta [anthropic] api_key en Secrets. Agregá: [anthropic]\napi_key = 'sk-ant-...'"}
+        import anthropic, base64, json, re
+        client_ai = anthropic.Anthropic(api_key=api_key)
+        ext = filename.lower().rsplit(".", 1)[-1]
+        prompt = (
+            "Analizá esta factura y extraé los datos en JSON con estas claves exactas:\n"
+            '{"nombre": "empresa o persona que emite", "numero_factura": "número", '
+            '"monto": 0.00, "moneda": "GTQ", '
+            '"fecha_emision": "YYYY-MM-DD", "fecha_vencimiento": "YYYY-MM-DD", '
+            '"descripcion": "descripción del servicio"}\n'
+            "Si un dato no aparece usá null. Respondé SOLO con el JSON."
+        )
+        if ext == "pdf":
+            texto = _extract_pdf_text(file_bytes)
+            if texto:
+                resp = client_ai.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=600,
+                    messages=[{"role": "user", "content": f"{prompt}\n\nTexto:\n{texto}"}]
+                )
+            else:
+                b64 = base64.standard_b64encode(file_bytes).decode()
+                resp = client_ai.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=600,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+                        {"type": "text", "text": prompt}
+                    ]}]
+                )
+        else:
+            mt = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+            b64 = base64.standard_b64encode(file_bytes).decode()
+            resp = client_ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=600,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}},
+                    {"type": "text", "text": prompt}
+                ]}]
+            )
+        raw = resp.content[0].text.strip()
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        return json.loads(m.group()) if m else {"error": f"Respuesta inesperada: {raw[:120]}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # PROVEEDORES
 # ═════════════════════════════════════════════════════════════════════════════
@@ -336,42 +385,71 @@ def _prov_nueva_entrada():
     st.markdown("### Registrar nueva factura de proveedor")
 
     modo = st.radio(
-        "¿Qué tenés disponible?",
-        ["📄 Tengo la factura completa", "💰 Solo sé el monto (la factura llega después)"],
+        "¿Cómo querés cargar?",
+        ["🤖 Subir factura (IA la procesa)", "📄 Tengo los datos completos", "💰 Solo sé el monto (la factura llega después)"],
         horizontal=True, key="prov_modo_entrada"
     )
-    tiene_factura = modo.startswith("📄")
 
-    if not tiene_factura:
-        st.info(
-            "**Modo sin factura:** Registrás el monto y el proveedor. "
-            "Cuando llegue la factura, editás este registro para agregar el N° y actualizás el estado."
-        )
+    ocr = {}
+    if modo.startswith("🤖"):
+        archivo = st.file_uploader("Subí la factura (PDF, JPG, PNG)", type=["pdf","jpg","jpeg","png"], key="prov_ocr_file")
+        if archivo:
+            if st.button("🤖 Procesar con IA", key="prov_ocr_btn", type="primary"):
+                with st.spinner("Leyendo factura con IA..."):
+                    resultado = _ocr_factura_ia(archivo.read(), archivo.name)
+                if "error" in resultado:
+                    st.error(f"❌ {resultado['error']}")
+                else:
+                    st.session_state["prov_ocr"] = resultado
+                    st.success("✅ Datos extraídos — revisá y editá si es necesario.")
+                    st.rerun()
+        ocr = st.session_state.get("prov_ocr", {})
+        if ocr:
+            with st.expander("📋 Datos extraídos por la IA", expanded=True):
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Nombre", ocr.get("nombre") or "—")
+                c2.metric("Monto", f"{ocr.get('monto') or 0:,.2f} {ocr.get('moneda','GTQ')}")
+                c3.metric("N° Factura", ocr.get("numero_factura") or "—")
+
+    if modo.endswith("(la factura llega después)"):
+        st.info("**Modo sin factura:** Cuando llegue la factura, editá este registro para completar los datos.")
+
+    tiene_factura = not modo.endswith("(la factura llega después)")
+
+    # Defaults desde OCR
+    _def_prov  = _safe(ocr.get("nombre", ""))
+    _def_fac   = _safe(ocr.get("numero_factura", ""))
+    _def_monto = float(ocr.get("monto") or 0.0)
+    _def_obs   = _safe(ocr.get("descripcion", ""))
+    try:
+        _def_fv = pd.Timestamp(ocr["fecha_vencimiento"]).date() if ocr.get("fecha_vencimiento") else datetime.date.today() + datetime.timedelta(days=30)
+    except Exception:
+        _def_fv = datetime.date.today() + datetime.timedelta(days=30)
 
     with st.form("form_nueva_prov", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
-            proveedor = st.text_input("Proveedor *", placeholder="Ej. Impresos del Pacífico SA")
+            proveedor = st.text_input("Proveedor *", value=_def_prov, placeholder="Ej. Impresos del Pacífico SA")
         with c2:
             pais = st.selectbox("País", PAISES, index=PAISES.index("GUATEMALA"))
 
         c3, c4 = st.columns(2)
         with c3:
-            monto_gtq = st.number_input("Monto GTQ *", min_value=0.0, value=0.0, step=100.0, format="%.2f")
+            monto_gtq = st.number_input("Monto GTQ *", min_value=0.0, value=_def_monto, step=100.0, format="%.2f")
         with c4:
             monto_usd = st.number_input("Equivalente USD", min_value=0.0, value=0.0, step=10.0, format="%.2f")
 
         if tiene_factura:
             c5, c6 = st.columns(2)
             with c5:
-                num_factura = st.text_input("N° Factura *", placeholder="FAC-2026-001")
+                num_factura = st.text_input("N° Factura *", value=_def_fac, placeholder="FAC-2026-001")
             with c6:
-                fecha_venc = st.date_input("Fecha de Vencimiento *", value=datetime.date.today() + datetime.timedelta(days=30))
+                fecha_venc = st.date_input("Fecha de Vencimiento *", value=_def_fv)
         else:
             num_factura = ""
-            fecha_venc  = st.date_input("Fecha estimada de vencimiento", value=datetime.date.today() + datetime.timedelta(days=30))
+            fecha_venc  = st.date_input("Fecha estimada de vencimiento", value=_def_fv)
 
-        obs = st.text_area("Observaciones / Referencia interna", placeholder="Ej. Orden de compra #456...", height=70)
+        obs = st.text_area("Observaciones / Referencia interna", value=_def_obs, placeholder="Ej. Orden de compra #456...", height=70)
         sub = st.form_submit_button("💾 Guardar", type="primary", use_container_width=True)
 
         if sub:
@@ -399,6 +477,7 @@ def _prov_nueva_entrada():
                     data["numero_factura"] = num_factura.strip().upper()
                 ok = add_proveedor_cc(data)
                 if ok:
+                    st.session_state.pop("prov_ocr", None)
                     st.success("✅ Entrada registrada correctamente.")
                     st.rerun()
                 else:
@@ -734,28 +813,66 @@ def _cli_seguimiento(df, hoy):
 def _cli_nueva_factura():
     st.markdown("### Registrar factura a cobrar")
 
+    modo_cli = st.radio(
+        "¿Cómo querés cargar?",
+        ["🤖 Subir factura (IA la procesa)", "✏️ Carga manual"],
+        horizontal=True, key="cli_modo_entrada"
+    )
+
+    ocr_cli = {}
+    if modo_cli.startswith("🤖"):
+        archivo_cli = st.file_uploader("Subí la factura (PDF, JPG, PNG)", type=["pdf","jpg","jpeg","png"], key="cli_ocr_file")
+        if archivo_cli:
+            if st.button("🤖 Procesar con IA", key="cli_ocr_btn", type="primary"):
+                with st.spinner("Leyendo factura con IA..."):
+                    res_cli = _ocr_factura_ia(archivo_cli.read(), archivo_cli.name)
+                if "error" in res_cli:
+                    st.error(f"❌ {res_cli['error']}")
+                else:
+                    st.session_state["cli_ocr"] = res_cli
+                    st.success("✅ Datos extraídos — revisá y editá si es necesario.")
+                    st.rerun()
+        ocr_cli = st.session_state.get("cli_ocr", {})
+        if ocr_cli:
+            with st.expander("📋 Datos extraídos por la IA", expanded=True):
+                c1x, c2x, c3x = st.columns(3)
+                c1x.metric("Cliente", ocr_cli.get("nombre") or "—")
+                c2x.metric("Monto", f"{ocr_cli.get('monto') or 0:,.2f} {ocr_cli.get('moneda','GTQ')}")
+                c3x.metric("N° Factura", ocr_cli.get("numero_factura") or "—")
+
+    _def_cli   = _safe(ocr_cli.get("nombre", ""))
+    _def_fac_c = _safe(ocr_cli.get("numero_factura", ""))
+    _def_mnt_c = float(ocr_cli.get("monto") or 0.0)
+    _def_obs_c = _safe(ocr_cli.get("descripcion", ""))
+    try:
+        _def_fv_c  = pd.Timestamp(ocr_cli["fecha_vencimiento"]).date() if ocr_cli.get("fecha_vencimiento") else datetime.date.today() + datetime.timedelta(days=30)
+        _def_fe_c  = pd.Timestamp(ocr_cli["fecha_emision"]).date()     if ocr_cli.get("fecha_emision")     else datetime.date.today()
+    except Exception:
+        _def_fv_c = datetime.date.today() + datetime.timedelta(days=30)
+        _def_fe_c = datetime.date.today()
+
     with st.form("form_nueva_cli", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
-            cliente = st.text_input("Cliente *", placeholder="Ej. Ministerio de Salud GT")
+            cliente = st.text_input("Cliente *", value=_def_cli, placeholder="Ej. Ministerio de Salud GT")
         with c2:
             pais = st.selectbox("País", PAISES, index=PAISES.index("GUATEMALA"))
 
         c3, c4 = st.columns(2)
         with c3:
-            num_factura = st.text_input("N° Factura *", placeholder="FAC-2026-001")
+            num_factura = st.text_input("N° Factura *", value=_def_fac_c, placeholder="FAC-2026-001")
         with c4:
-            monto_gtq = st.number_input("Monto GTQ *", min_value=0.0, value=0.0, step=100.0, format="%.2f")
+            monto_gtq = st.number_input("Monto GTQ *", min_value=0.0, value=_def_mnt_c, step=100.0, format="%.2f")
 
         c5, c6, c7 = st.columns(3)
         with c5:
             monto_usd = st.number_input("Equivalente USD", min_value=0.0, value=0.0, step=10.0, format="%.2f")
         with c6:
-            fecha_emision = st.date_input("Fecha de emisión *", value=datetime.date.today())
+            fecha_emision = st.date_input("Fecha de emisión *", value=_def_fe_c)
         with c7:
-            fecha_venc = st.date_input("Fecha de vencimiento *", value=datetime.date.today() + datetime.timedelta(days=30))
+            fecha_venc = st.date_input("Fecha de vencimiento *", value=_def_fv_c)
 
-        obs = st.text_area("Observaciones / Referencia", placeholder="Ej. Proyecto X, contrato 2026-12...", height=70)
+        obs = st.text_area("Observaciones / Referencia", value=_def_obs_c, placeholder="Ej. Proyecto X, contrato 2026-12...", height=70)
         sub = st.form_submit_button("💾 Guardar", type="primary", use_container_width=True)
 
         if sub:
@@ -781,6 +898,7 @@ def _cli_nueva_factura():
                 }
                 ok = add_cliente_cc(data)
                 if ok:
+                    st.session_state.pop("cli_ocr", None)
                     st.success("✅ Factura registrada correctamente.")
                     st.rerun()
                 else:
@@ -951,6 +1069,41 @@ def _estado_alerta(row, hoy, dias_prev, dias_crit):
     return "VIGENTE", dias_al_venc
 
 
+def _html_base(titulo, subtitulo, kpis_html, secciones_html, fecha_str):
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;background:#f4f4f4;padding:20px;margin:0;">
+    <div style="max-width:680px;margin:0 auto;background:white;border-radius:10px;
+        overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.1);">
+        <div style="background:linear-gradient(90deg,#0F4C81 0%,#4B9CD3 100%);padding:20px 28px;">
+            <div style="font-size:1.1rem;font-weight:800;color:white;">🏦 {titulo}</div>
+            <div style="font-size:.82rem;color:rgba(255,255,255,.75);margin-top:3px;">{subtitulo} · Corte {fecha_str}</div>
+        </div>
+        <div style="padding:24px 28px;">
+            <p style="color:#333;margin-top:0;">Dirección,</p>
+            <p style="color:#555;font-size:.88rem;">Se adjunta el estado al día de la fecha. A continuación el detalle del período.</p>
+            <div style="display:flex;gap:12px;margin:20px 0;">{kpis_html}</div>
+            {secciones_html}
+            <p style="font-size:.72rem;color:#aaa;border-top:1px solid #eee;padding-top:14px;margin-top:24px;margin-bottom:0;">
+                Generado automáticamente · PROA Consulting · {fecha_str}
+            </p>
+        </div>
+    </div>
+    </body></html>"""
+
+
+def _html_tabla(df_in, cols):
+    rows = ""
+    for _, r in df_in.iterrows():
+        cells = "".join(f"<td style='padding:7px 8px;'>{v(r)}</td>" for _, v in cols)
+        rows += f"<tr style='border-bottom:1px solid #eee;'>{cells}</tr>"
+    headers = "".join(f"<th style='padding:7px 8px;text-align:left;'>{h}</th>" for h, _ in cols)
+    return (
+        f"<table style='width:100%;border-collapse:collapse;font-size:.82rem;margin-bottom:16px;'>"
+        f"<thead><tr style='background:#f0f4ff;color:#555;font-size:.75rem;'>{headers}</tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+
+
 def _generar_html_email(df_crit, df_prev, resumen):
     mes  = datetime.date.today().strftime("%B %Y")
     fecha_str = datetime.date.today().strftime("%d/%m/%Y")
@@ -1049,6 +1202,67 @@ def _generar_html_email(df_crit, df_prev, resumen):
     </body></html>"""
 
 
+def _generar_html_email_proveedores(df_crit, df_prev, df_tarde, resumen):
+    fecha_str = datetime.date.today().strftime("%d/%m/%Y")
+    cols = [
+        ("Proveedor",    lambda r: _safe(r.get("proveedor"))),
+        ("N° Factura",   lambda r: _safe(r.get("numero_factura")) or "S/N"),
+        ("Vencimiento",  lambda r: _fmt_date(r.get("fecha_vencimiento"))),
+        ("Monto",        lambda r: f"Q {float(r.get('monto_local') or 0):,.2f}"),
+    ]
+    cols_tarde = [
+        ("Proveedor",    lambda r: _safe(r.get("proveedor"))),
+        ("N° Factura",   lambda r: _safe(r.get("numero_factura")) or "S/N"),
+        ("Vto.",         lambda r: _fmt_date(r.get("fecha_vencimiento"))),
+        ("F. Pago",      lambda r: _fmt_date(r.get("fecha_pago"))),
+        ("Días tardío",  lambda r: str(r.get("_dias_tarde", 0))),
+        ("Monto",        lambda r: f"Q {float(r.get('monto_local') or 0):,.2f}"),
+    ]
+    sec_crit = ""
+    if not df_crit.empty:
+        sec_crit = (
+            "<h3 style='color:#C62828;font-size:.82rem;text-transform:uppercase;"
+            "border-bottom:2px solid #ffcdd2;padding-bottom:5px;margin-top:24px;'>"
+            f"🔴 Pagos vencidos — Atención inmediata ({len(df_crit)})</h3>"
+            + _html_tabla(df_crit, cols)
+        )
+    sec_prev = ""
+    if not df_prev.empty:
+        sec_prev = (
+            "<h3 style='color:#E65100;font-size:.82rem;text-transform:uppercase;"
+            "border-bottom:2px solid #ffe0b2;padding-bottom:5px;margin-top:24px;'>"
+            f"⚠️ Próximos a vencer ({len(df_prev)})</h3>"
+            + _html_tabla(df_prev, cols)
+        )
+    sec_tarde = ""
+    if not df_tarde.empty:
+        sec_tarde = (
+            "<h3 style='color:#6A1B9A;font-size:.82rem;text-transform:uppercase;"
+            "border-bottom:2px solid #e1bee7;padding-bottom:5px;margin-top:24px;'>"
+            f"📊 Desvíos — Pagados fuera de término ({len(df_tarde)})</h3>"
+            + _html_tabla(df_tarde, cols_tarde)
+        )
+    kpis = (
+        f"<div style='flex:1;background:#fff3f3;border-radius:6px;padding:14px;text-align:center;'>"
+        f"<div style='font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;'>Vencidas a pagar</div>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#C62828;'>{resumen['n_criticas']}</div></div>"
+        f"<div style='flex:1;background:#f0f4ff;border-radius:6px;padding:14px;text-align:center;'>"
+        f"<div style='font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;'>Total pendiente</div>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#1565C0;'>Q {resumen['total_pend']:,.2f}</div></div>"
+        f"<div style='flex:1;background:#fffde7;border-radius:6px;padding:14px;text-align:center;'>"
+        f"<div style='font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;'>Preventivas</div>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#E65100;'>{resumen['n_prev']}</div></div>"
+        f"<div style='flex:1;background:#f3e5f5;border-radius:6px;padding:14px;text-align:center;'>"
+        f"<div style='font-size:.7rem;color:#888;text-transform:uppercase;margin-bottom:4px;'>Desvíos</div>"
+        f"<div style='font-size:1.3rem;font-weight:800;color:#6A1B9A;'>{resumen['n_tarde']}</div></div>"
+    )
+    return _html_base(
+        "Cuenta Corriente — Pagos a Proveedores",
+        "Informe de egresos y desvíos",
+        kpis, sec_crit + sec_prev + sec_tarde, fecha_str
+    )
+
+
 def _enviar_email(html_content, destinatarios):
     import smtplib
     from email.mime.multipart import MIMEMultipart
@@ -1086,6 +1300,14 @@ def _enviar_email(html_content, destinatarios):
 
 def _render_alertas(pais_sel, theme_color):
     hoy = datetime.date.today()
+    tab_cli_a, tab_prov_a = st.tabs(["📤 Cobros — Clientes", "📥 Pagos — Proveedores"])
+    with tab_cli_a:
+        _render_alertas_clientes(pais_sel, theme_color, hoy)
+    with tab_prov_a:
+        _render_alertas_proveedores(pais_sel, theme_color, hoy)
+
+
+def _render_alertas_clientes(pais_sel, theme_color, hoy):
     df  = get_clientes_cc()
     if not df.empty and pais_sel != "TODOS" and "pais" in df.columns:
         df = df[df["pais"] == pais_sel].copy()
@@ -1333,6 +1555,129 @@ Si usás Gmail, generá una **App Password** en myaccount.google.com → Segurid
     with col_info:
         dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
         st.caption("📧 Destinatarios: " + " · ".join(dests) if dests else "Sin destinatarios configurados")
+
+
+def _render_alertas_proveedores(pais_sel, theme_color, hoy):
+    df = get_proveedores_cc()
+    if not df.empty and pais_sel != "TODOS" and "pais" in df.columns:
+        df = df[df["pais"] == pais_sel].copy()
+
+    dias_prev = st.session_state.get("alerta_dias_prev", 5)
+    dias_crit = st.session_state.get("alerta_dias_crit", 0)
+    dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
+
+    if df.empty:
+        st.info("No hay facturas de proveedores registradas.")
+        return
+
+    df["_ev"] = df.apply(lambda r: _estado_visual_prov(r, hoy), axis=1)
+    resultados_p = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
+    df["_alerta_est"]  = [r[0] for r in resultados_p]
+    df["_alerta_dias"] = [r[1] for r in resultados_p]
+
+    df_crit_p = df[df["_alerta_est"] == "CRITICA"].sort_values("_alerta_dias", ascending=False)
+    df_prev_p = df[df["_alerta_est"] == "PREVENTIVA"].sort_values("_alerta_dias")
+
+    # Desvíos: pagadas después de vencimiento
+    df_pag = df[df["_ev"] == "PAGADA"].copy()
+    df_tarde = pd.DataFrame()
+    if not df_pag.empty:
+        df_pag2 = df_pag[df_pag["fecha_pago"].notna() & df_pag["fecha_vencimiento"].notna()].copy()
+        if not df_pag2.empty:
+            df_pag2["_dias_tarde"] = df_pag2.apply(
+                lambda r: max(0, (pd.Timestamp(r["fecha_pago"]).date() - pd.Timestamp(r["fecha_vencimiento"]).date()).days), axis=1
+            )
+            df_tarde = df_pag2[df_pag2["_dias_tarde"] > 0].sort_values("_dias_tarde", ascending=False)
+
+    total_pend_p = df[df["_ev"].isin(["PENDIENTE","SIN_FACTURA","VENCIDA"])]["monto_local"].sum()
+    total_crit_p = df_crit_p["monto_local"].sum() if not df_crit_p.empty else 0
+    avg_tarde = df_tarde["_dias_tarde"].mean() if not df_tarde.empty else 0
+
+    # KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    _kpi_card(c1, "Vencidas a pagar",   str(len(df_crit_p)), f"Q {total_crit_p:,.2f}",  C_DANGER)
+    _kpi_card(c2, "Total pendiente",    f"Q {total_pend_p:,.2f}", f"{len(df_crit_p)+len(df_prev_p)} alertas", C_WARNING)
+    _kpi_card(c3, "Por vencer pronto",  str(len(df_prev_p)), "próximos vencimientos",   theme_color)
+    _kpi_card(c4, "Desvío promedio",    f"{avg_tarde:.0f} días", f"{len(df_tarde)} pagos tardíos", "#A855F7")
+
+    st.markdown("")
+
+    # Críticas
+    if not df_crit_p.empty:
+        st.markdown(f"<div style='color:{C_DANGER};font-weight:700;font-size:.78rem;letter-spacing:1px;text-transform:uppercase;margin:.5rem 0 .4rem;'>🚨 Pagos vencidos — Atención inmediata</div>", unsafe_allow_html=True)
+        tc = st.session_state.get("tc", theme_color)
+        for _, row in df_crit_p.iterrows():
+            mora  = int(row["_alerta_dias"])
+            monto = float(row.get("monto_local") or 0)
+            fac   = _safe(row.get("numero_factura")) or "S/N"
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,{C_DANGER}15 0%,#1A1F2E 100%);"
+                f"border-left:4px solid {C_DANGER};border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
+                f"<div><div style='font-weight:700;color:#FAFAFA;'>{_safe(row.get('proveedor'))} · <span style='font-size:.82rem;color:#A0A4B8;'>{fac}</span></div>"
+                f"<div style='font-size:.75rem;color:#A0A4B8;margin-top:3px;'>Venció hace <b>{mora} día{'s' if mora!=1 else ''}</b> · {_fmt_date(row.get('fecha_vencimiento'))}</div></div>"
+                f"<div style='font-weight:800;color:{C_DANGER};white-space:nowrap;'>Q {monto:,.2f}</div>"
+                "</div></div>", unsafe_allow_html=True
+            )
+
+    # Preventivas
+    if not df_prev_p.empty:
+        st.markdown(f"<div style='color:{C_WARNING};font-weight:700;font-size:.78rem;letter-spacing:1px;text-transform:uppercase;margin:1rem 0 .4rem;'>⚠️ Próximos vencimientos</div>", unsafe_allow_html=True)
+        for _, row in df_prev_p.iterrows():
+            dias_r = int(row["_alerta_dias"])
+            monto  = float(row.get("monto_local") or 0)
+            fac    = _safe(row.get("numero_factura")) or "S/N"
+            label  = "vence hoy" if dias_r == 0 else f"vence en {dias_r}d"
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,{C_WARNING}12 0%,#1A1F2E 100%);"
+                f"border-left:4px solid {C_WARNING};border-radius:8px;padding:.8rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
+                f"<div><div style='font-weight:700;color:#FAFAFA;'>{_safe(row.get('proveedor'))} · <span style='font-size:.82rem;color:#A0A4B8;'>{fac}</span></div>"
+                f"<div style='font-size:.75rem;color:#A0A4B8;margin-top:3px;'><b>{label}</b> · {_fmt_date(row.get('fecha_vencimiento'))}</div></div>"
+                f"<div style='font-weight:800;color:{C_WARNING};white-space:nowrap;'>Q {monto:,.2f}</div>"
+                "</div></div>", unsafe_allow_html=True
+            )
+
+    # Desvíos
+    if not df_tarde.empty:
+        st.markdown("<div style='color:#A855F7;font-weight:700;font-size:.78rem;letter-spacing:1px;text-transform:uppercase;margin:1rem 0 .4rem;'>📊 Desvíos — Pagados fuera de término</div>", unsafe_allow_html=True)
+        for _, row in df_tarde.iterrows():
+            dias_t = int(row["_dias_tarde"])
+            monto  = float(row.get("monto_local") or 0)
+            st.markdown(
+                "<div style='background:linear-gradient(135deg,#A855F715 0%,#1A1F2E 100%);"
+                "border-left:4px solid #A855F7;border-radius:8px;padding:.7rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
+                f"<div><div style='font-weight:700;color:#FAFAFA;'>{_safe(row.get('proveedor'))}</div>"
+                f"<div style='font-size:.75rem;color:#A0A4B8;'>Pagado <b>{dias_t} día{'s' if dias_t!=1 else ''}</b> tarde · Vto: {_fmt_date(row.get('fecha_vencimiento'))} → Pago: {_fmt_date(row.get('fecha_pago'))}</div></div>"
+                f"<div style='font-weight:800;color:#A855F7;white-space:nowrap;'>Q {monto:,.2f}</div>"
+                "</div></div>", unsafe_allow_html=True
+            )
+
+    if df_crit_p.empty and df_prev_p.empty:
+        st.markdown(f"<div style='background:{C_SUCCESS}12;border:1px solid {C_SUCCESS}44;border-radius:10px;padding:1.5rem;text-align:center;'><div style='font-size:2rem;'>✅</div><div style='color:{C_SUCCESS};font-weight:700;'>Sin alertas de pago activas</div></div>", unsafe_allow_html=True)
+        return
+
+    # Email
+    st.markdown("---")
+    col_btn2, col_info2 = st.columns([1, 2])
+    with col_btn2:
+        if st.button("📧 Enviar informe de pagos", type="primary", use_container_width=True, key="btn_email_prov"):
+            dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
+            if not dests:
+                st.error("Agregá al menos un destinatario en ⚙️ Configuración.")
+            else:
+                resumen_p = {"total_pend": total_pend_p, "n_criticas": len(df_crit_p), "n_prev": len(df_prev_p), "n_tarde": len(df_tarde)}
+                html_p = _generar_html_email_proveedores(df_crit_p, df_prev_p, df_tarde, resumen_p)
+                with st.spinner("Enviando..."):
+                    ok, msg = _enviar_email(html_p, dests)
+                if ok:
+                    st.success(f"✅ Informe de pagos enviado a: {', '.join(dests)}")
+                else:
+                    st.error(f"❌ {msg}")
+    with col_info2:
+        dests_show = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
+        st.caption("📧 " + " · ".join(dests_show) if dests_show else "Sin destinatarios")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
