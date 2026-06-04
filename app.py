@@ -179,6 +179,34 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
+def _get_tipo_cambio(fecha_str: str) -> tuple[float, str]:
+    """
+    Devuelve (tipo_cambio_gtq_por_usd, fuente).
+    Consulta la API gratuita de fawazahmed0 para la fecha indicada.
+    """
+    import urllib.request, json as _json
+    fecha_fmt = "latest"
+    try:
+        fecha_fmt = pd.Timestamp(fecha_str).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    for url in [
+        f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{fecha_fmt}/v1/currencies/usd.json",
+        "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json",
+    ]:
+        try:
+            with urllib.request.urlopen(url, timeout=6) as resp:
+                data = _json.loads(resp.read())
+            rate = data.get("usd", {}).get("gtq")
+            if rate and float(rate) > 0:
+                fuente = f"Tipo de cambio {data.get('date', fecha_fmt)}"
+                return float(rate), fuente
+        except Exception:
+            continue
+    return 7.75, "Tipo de cambio estimado (sin conexión)"
+
+
 def _ocr_factura_ia(file_bytes: bytes, filename: str, tipo: str = "proveedor") -> dict:
     """
     tipo="proveedor": extrae el EMISOR (quien nos factura a nosotros)
@@ -433,16 +461,29 @@ def _prov_nueva_entrada():
                 if "error" in resultado:
                     st.error(f"❌ {resultado['error']}")
                 else:
+                    # Conversión automática GTQ → USD
+                    monto = float(resultado.get("monto") or 0)
+                    moneda = resultado.get("moneda", "GTQ")
+                    fecha_fac = resultado.get("fecha_emision") or datetime.date.today().isoformat()
+                    if monto > 0 and moneda == "GTQ":
+                        with st.spinner("Buscando tipo de cambio oficial..."):
+                            tc, tc_fuente = _get_tipo_cambio(fecha_fac)
+                        resultado["_tc"]        = tc
+                        resultado["_tc_fuente"] = tc_fuente
+                        resultado["_monto_usd"] = round(monto / tc, 2)
                     st.session_state["prov_ocr"] = resultado
                     st.success("✅ Datos extraídos — revisá y editá si es necesario.")
                     st.rerun()
         ocr = st.session_state.get("prov_ocr", {})
         if ocr:
             with st.expander("📋 Datos extraídos por la IA", expanded=True):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Nombre", ocr.get("nombre") or "—")
-                c2.metric("Monto", f"{ocr.get('monto') or 0:,.2f} {ocr.get('moneda','GTQ')}")
-                c3.metric("N° Factura", ocr.get("numero_factura") or "—")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Proveedor", ocr.get("nombre") or "—")
+                c2.metric("Monto GTQ", f"Q {ocr.get('monto') or 0:,.2f}")
+                c3.metric("Equivalente USD", f"$ {ocr.get('_monto_usd') or 0:,.2f}")
+                c4.metric("N° Factura", ocr.get("numero_factura") or "—")
+                if ocr.get("_tc"):
+                    st.caption(f"💱 {ocr.get('_tc_fuente','')} · Q {ocr['_tc']:.4f} por USD")
 
     if modo.endswith("(la factura llega después)"):
         st.info("**Modo sin factura:** Cuando llegue la factura, editá este registro para completar los datos.")
@@ -450,10 +491,11 @@ def _prov_nueva_entrada():
     tiene_factura = not modo.endswith("(la factura llega después)")
 
     # Defaults desde OCR
-    _def_prov  = _safe(ocr.get("nombre", ""))
-    _def_fac   = _safe(ocr.get("numero_factura", ""))
-    _def_monto = float(ocr.get("monto") or 0.0)
-    _def_obs   = _safe(ocr.get("descripcion", ""))
+    _def_prov     = _safe(ocr.get("nombre", ""))
+    _def_fac      = _safe(ocr.get("numero_factura", ""))
+    _def_monto    = float(ocr.get("monto") or 0.0)
+    _def_monto_usd = float(ocr.get("_monto_usd") or 0.0)
+    _def_obs      = _safe(ocr.get("descripcion", ""))
     try:
         _def_fv = pd.Timestamp(ocr["fecha_vencimiento"]).date() if ocr.get("fecha_vencimiento") else datetime.date.today() + datetime.timedelta(days=30)
     except Exception:
@@ -470,7 +512,10 @@ def _prov_nueva_entrada():
         with c3:
             monto_gtq = st.number_input("Monto GTQ *", min_value=0.0, value=_def_monto, step=100.0, format="%.2f")
         with c4:
-            monto_usd = st.number_input("Equivalente USD", min_value=0.0, value=0.0, step=10.0, format="%.2f")
+            monto_usd = st.number_input(
+                "Equivalente USD" + (f" (TC: Q {ocr['_tc']:.4f})" if ocr.get("_tc") else ""),
+                min_value=0.0, value=_def_monto_usd, step=10.0, format="%.2f"
+            )
 
         if tiene_factura:
             c5, c6 = st.columns(2)
