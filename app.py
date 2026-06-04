@@ -1474,44 +1474,36 @@ Si usás Gmail, generá una **App Password** en myaccount.google.com → Segurid
     dias_crit = st.session_state.get("alerta_dias_crit", 0)
     dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
 
-    # ── Datos de ejemplo para preview/test ───────────────────────────────────
-    hoy_ts = pd.Timestamp(hoy)
-    _demo = pd.DataFrame([
-        {"cliente": "UNICEF Guatemala",       "numero_factura": "GT-2026-APR-02", "monto_local": 11750.0,
-         "fecha_emision": hoy_ts - pd.Timedelta(days=22), "fecha_vencimiento": hoy_ts - pd.Timedelta(days=18),
-         "estado": "PENDIENTE", "observaciones": "Segundo período consecutivo con retraso"},
-        {"cliente": "Special Olympics Chile", "numero_factura": "CL-2026-APR-01", "monto_local": 22170.0,
-         "fecha_emision": hoy_ts - pd.Timedelta(days=22), "fecha_vencimiento": hoy_ts - pd.Timedelta(days=18),
-         "estado": "PENDIENTE", "observaciones": "Supera umbral de política de cobro"},
-        {"cliente": "UNICEF Paraguay",        "numero_factura": "PY-2026-MAY-01", "monto_local": 248000.0,
-         "fecha_emision": hoy_ts - pd.Timedelta(days=10), "fecha_vencimiento": hoy_ts + pd.Timedelta(days=4),
-         "estado": "PENDIENTE", "observaciones": "Mayor factura del período activo"},
-        {"cliente": "UNICEF Bolivia",         "numero_factura": "BO-2026-MAY-01", "monto_local": 58000.0,
-         "fecha_emision": hoy_ts - pd.Timedelta(days=10), "fecha_vencimiento": hoy_ts + pd.Timedelta(days=4),
-         "estado": "PENDIENTE", "observaciones": ""},
-    ])
-    _demo["_alerta_est"]  = [_estado_alerta(r, hoy, dias_prev, dias_crit)[0] for _, r in _demo.iterrows()]
-    _demo["_alerta_dias"] = [_estado_alerta(r, hoy, dias_prev, dias_crit)[1] for _, r in _demo.iterrows()]
-    _demo_crit = _demo[_demo["_alerta_est"] == "CRITICA"]
-    _demo_prev = _demo[_demo["_alerta_est"] == "PREVENTIVA"]
-    _demo_resumen = {
-        "total_pend": _demo["monto_local"].sum(),
-        "n_criticas": len(_demo_crit),
-        "n_prev":     len(_demo_prev),
-    }
+    # ── Calcular estados con datos reales ────────────────────────────────────
+    hay_datos_cli = not df.empty
+    if hay_datos_cli:
+        resultados_c = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
+        df["_alerta_est"]  = [r[0] for r in resultados_c]
+        df["_alerta_dias"] = [r[1] for r in resultados_c]
+        df_crit_r = df[df["_alerta_est"] == "CRITICA"].sort_values("_alerta_dias", ascending=False)
+        df_prev_r = df[df["_alerta_est"] == "PREVENTIVA"].sort_values("_alerta_dias")
+        df_cob_r  = df[df["_alerta_est"] == "COBRADA"]
+        total_pend_r = df[df["_alerta_est"].isin(["CRITICA","PREVENTIVA","VIGENTE"])]["monto_local"].sum()
+        resumen_real_c = {"total_pend": total_pend_r, "n_criticas": len(df_crit_r), "n_prev": len(df_prev_r)}
+    else:
+        df_crit_r = df_prev_r = df_cob_r = pd.DataFrame()
+        total_pend_r = 0
+        resumen_real_c = {"total_pend": 0, "n_criticas": 0, "n_prev": 0}
 
-    # ── Botones preview / test email ──────────────────────────────────────────
+    # ── Botones preview / email con datos reales ──────────────────────────────
     col_prev, col_test, _ = st.columns([1, 1, 2])
     with col_prev:
         mostrar_preview = st.toggle("👁 Ver preview email", key="toggle_preview_email")
     with col_test:
-        if st.button("📧 Enviar email de prueba", key="btn_test_email"):
+        if st.button("📧 Enviar email con datos reales", key="btn_test_email"):
             dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
             if not dests:
                 st.error("Agregá al menos un destinatario.")
+            elif not hay_datos_cli:
+                st.warning("No hay datos de clientes cargados.")
             else:
-                html_test = _generar_html_email(_demo_crit, _demo_prev, _demo_resumen)
-                with st.spinner("Enviando email de prueba..."):
+                html_test = _generar_html_email(df_crit_r, df_prev_r, resumen_real_c)
+                with st.spinner("Enviando..."):
                     ok, msg = _enviar_email(html_test, dests)
                 if ok:
                     st.success(f"✅ Email de prueba enviado a: {', '.join(dests)}")
@@ -1524,20 +1516,22 @@ Si usás Gmail, generá una **App Password** en myaccount.google.com → Segurid
             st.components.v1.html(html_preview, height=650, scrolling=True)
         st.markdown("")
 
-    # ── Calcular estados ─────────────────────────────────────────────────────
-    if df.empty:
-        st.info("💡 No hay facturas cargadas aún. El preview de arriba muestra cómo se verá cuando haya datos.")
+    if mostrar_preview:
+        html_prev = _generar_html_email(df_crit_r, df_prev_r, resumen_real_c)
+        titulo_exp = "📄 Vista previa — datos reales" if hay_datos_cli else "📄 Vista previa — sin datos cargados"
+        with st.expander(titulo_exp, expanded=True):
+            st.components.v1.html(html_prev, height=650, scrolling=True)
+        st.markdown("")
+
+    if not hay_datos_cli:
+        st.info("💡 No hay facturas de clientes cargadas aún.")
         return
 
-    resultados = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
-    df["_alerta_est"]  = [r[0] for r in resultados]
-    df["_alerta_dias"] = [r[1] for r in resultados]
-
-    df_crit = df[df["_alerta_est"] == "CRITICA"].sort_values("_alerta_dias", ascending=False)
-    df_prev = df[df["_alerta_est"] == "PREVENTIVA"].sort_values("_alerta_dias")
-    df_cob  = df[df["_alerta_est"] == "COBRADA"]
-
-    total_pend = df[df["_alerta_est"].isin(["CRITICA","PREVENTIVA","VIGENTE"])]["monto_local"].sum()
+    # Usar datos ya calculados arriba
+    df_crit = df_crit_r
+    df_prev = df_prev_r
+    df_cob  = df_cob_r
+    total_pend = total_pend_r
     total_crit = df_crit["monto_local"].sum() if not df_crit.empty else 0
 
     # ── KPIs ─────────────────────────────────────────────────────────────────
@@ -1675,85 +1669,70 @@ def _render_alertas_proveedores(pais_sel, theme_color, hoy):
     dias_crit = st.session_state.get("alerta_dias_crit", 0)
     dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
 
-    # Demo data para preview
-    hoy_ts = pd.Timestamp(hoy)
-    _demo_p = pd.DataFrame([
-        {"proveedor": "3B SOLUCIONES EMPRESARIALES", "numero_factura": "65E20D18-455363674",
-         "monto_local": 899.75, "fecha_vencimiento": hoy_ts - pd.Timedelta(days=12),
-         "fecha_pago": None, "estado": "PENDIENTE", "pais": "GUATEMALA"},
-        {"proveedor": "ALTERNATIVAS FINANCIERAS CM", "numero_factura": "096A2C40-1439974598",
-         "monto_local": 5000.0, "fecha_vencimiento": hoy_ts - pd.Timedelta(days=5),
-         "fecha_pago": None, "estado": "PENDIENTE", "pais": "GUATEMALA"},
-        {"proveedor": "HUMAND NAVEGANTES", "numero_factura": "HN-2026-042",
-         "monto_local": 12500.0, "fecha_vencimiento": hoy_ts + pd.Timedelta(days=3),
-         "fecha_pago": None, "estado": "PENDIENTE", "pais": "GUATEMALA"},
-        {"proveedor": "SERVICIOS LEGALES GT", "numero_factura": "SL-2026-018",
-         "monto_local": 3200.0, "fecha_vencimiento": hoy_ts - pd.Timedelta(days=20),
-         "fecha_pago": hoy_ts - pd.Timedelta(days=10), "estado": "PAGADA", "pais": "GUATEMALA",
-         "_dias_tarde": 10},
-    ])
-    _demo_p["_ev"] = _demo_p.apply(lambda r: "PAGADA" if r["estado"] == "PAGADA" else "PENDIENTE", axis=1)
-    _demo_p["_alerta_est"] = _demo_p.apply(lambda r: _estado_alerta(r, hoy, dias_prev, dias_crit)[0], axis=1)
-    _demo_p["_alerta_dias"] = _demo_p.apply(lambda r: _estado_alerta(r, hoy, dias_prev, dias_crit)[1], axis=1)
-    _demo_p_crit  = _demo_p[_demo_p["_alerta_est"] == "CRITICA"]
-    _demo_p_prev  = _demo_p[_demo_p["_alerta_est"] == "PREVENTIVA"]
-    _demo_p_tarde = _demo_p[_demo_p["_ev"] == "PAGADA"].copy()
-    if not _demo_p_tarde.empty and "_dias_tarde" not in _demo_p_tarde.columns:
-        _demo_p_tarde["_dias_tarde"] = 0
-    _demo_p_res = {
-        "total_pend": _demo_p[_demo_p["estado"] != "PAGADA"]["monto_local"].sum(),
-        "n_criticas": len(_demo_p_crit), "n_prev": len(_demo_p_prev), "n_tarde": len(_demo_p_tarde),
-    }
+    # ── Calcular datos reales primero ─────────────────────────────────────────
+    hay_datos = not df.empty
+    if hay_datos:
+        df["_ev"] = df.apply(lambda r: _estado_visual_prov(r, hoy), axis=1)
+        resultados_p = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
+        df["_alerta_est"]  = [r[0] for r in resultados_p]
+        df["_alerta_dias"] = [r[1] for r in resultados_p]
+        df_crit_p = df[df["_alerta_est"] == "CRITICA"].sort_values("_alerta_dias", ascending=False)
+        df_prev_p = df[df["_alerta_est"] == "PREVENTIVA"].sort_values("_alerta_dias")
+        df_pag = df[df["_ev"] == "PAGADA"].copy()
+        df_tarde = pd.DataFrame()
+        if not df_pag.empty:
+            df_pag2 = df_pag[df_pag["fecha_pago"].notna() & df_pag["fecha_vencimiento"].notna()].copy()
+            if not df_pag2.empty:
+                df_pag2["_dias_tarde"] = df_pag2.apply(
+                    lambda r: max(0, (pd.Timestamp(r["fecha_pago"]).date() - pd.Timestamp(r["fecha_vencimiento"]).date()).days), axis=1
+                )
+                df_tarde = df_pag2[df_pag2["_dias_tarde"] > 0].sort_values("_dias_tarde", ascending=False)
+        total_pend_p = df[df["_ev"].isin(["PENDIENTE","SIN_FACTURA","VENCIDA"])]["monto_local"].sum()
+        total_crit_p = df_crit_p["monto_local"].sum() if not df_crit_p.empty else 0
+        avg_tarde    = df_tarde["_dias_tarde"].mean() if not df_tarde.empty else 0
+        resumen_real = {"total_pend": total_pend_p, "n_criticas": len(df_crit_p),
+                        "n_prev": len(df_prev_p), "n_tarde": len(df_tarde)}
+    else:
+        df_crit_p = df_prev_p = df_tarde = pd.DataFrame()
+        total_pend_p = total_crit_p = avg_tarde = 0
+        resumen_real = {"total_pend": 0, "n_criticas": 0, "n_prev": 0, "n_tarde": 0}
 
+    # ── Preview / envío con datos reales ─────────────────────────────────────
+    label_preview = "👁 Ver preview email" + ("" if hay_datos else " (sin datos aún)")
     col_prev_p, col_test_p, _ = st.columns([1, 1, 2])
     with col_prev_p:
-        mostrar_preview_p = st.toggle("👁 Ver preview email", key="toggle_preview_prov")
+        mostrar_preview_p = st.toggle(label_preview, key="toggle_preview_prov")
     with col_test_p:
-        if st.button("📧 Enviar email de prueba", key="btn_test_prov"):
+        if st.button("📧 Enviar email con datos reales", key="btn_test_prov"):
             dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
             if not dests:
                 st.error("Agregá al menos un destinatario en ⚙️ Configuración (tab Clientes).")
+            elif not hay_datos:
+                st.warning("No hay datos cargados todavía.")
             else:
-                html_test_p = _generar_html_email_proveedores(_demo_p_crit, _demo_p_prev, _demo_p_tarde, _demo_p_res)
-                with st.spinner("Enviando email de prueba..."):
-                    ok, msg = _enviar_email(html_test_p, dests)
+                html_p = _generar_html_email_proveedores(df_crit_p, df_prev_p, df_tarde, resumen_real)
+                with st.spinner("Enviando..."):
+                    ok, msg = _enviar_email(html_p, dests)
                 if ok:
-                    st.success(f"✅ Email de prueba enviado a: {', '.join(dests)}")
+                    st.success(f"✅ Email enviado a: {', '.join(dests)}")
                 else:
                     st.error(f"❌ {msg}")
 
     if mostrar_preview_p:
-        html_prev_p = _generar_html_email_proveedores(_demo_p_crit, _demo_p_prev, _demo_p_tarde, _demo_p_res)
-        with st.expander("📄 Vista previa del email de pagos (datos de ejemplo)", expanded=True):
+        if hay_datos:
+            html_prev_p = _generar_html_email_proveedores(df_crit_p, df_prev_p, df_tarde, resumen_real)
+            titulo_exp = "📄 Vista previa — datos reales"
+        else:
+            html_prev_p = _generar_html_email_proveedores(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+                                                          {"total_pend": 0, "n_criticas": 0, "n_prev": 0, "n_tarde": 0})
+            titulo_exp = "📄 Vista previa — sin datos cargados"
+        with st.expander(titulo_exp, expanded=True):
             st.components.v1.html(html_prev_p, height=650, scrolling=True)
         st.markdown("")
 
-    if df.empty:
-        st.info("💡 No hay facturas de proveedores cargadas aún. El preview muestra cómo se verá con datos reales.")
+    if not hay_datos:
+        st.info("💡 No hay facturas de proveedores cargadas aún.")
         return
-
-    df["_ev"] = df.apply(lambda r: _estado_visual_prov(r, hoy), axis=1)
-    resultados_p = [_estado_alerta(row, hoy, dias_prev, dias_crit) for _, row in df.iterrows()]
-    df["_alerta_est"]  = [r[0] for r in resultados_p]
-    df["_alerta_dias"] = [r[1] for r in resultados_p]
-
-    df_crit_p = df[df["_alerta_est"] == "CRITICA"].sort_values("_alerta_dias", ascending=False)
-    df_prev_p = df[df["_alerta_est"] == "PREVENTIVA"].sort_values("_alerta_dias")
-
-    # Desvíos: pagadas después de vencimiento
-    df_pag = df[df["_ev"] == "PAGADA"].copy()
-    df_tarde = pd.DataFrame()
-    if not df_pag.empty:
-        df_pag2 = df_pag[df_pag["fecha_pago"].notna() & df_pag["fecha_vencimiento"].notna()].copy()
-        if not df_pag2.empty:
-            df_pag2["_dias_tarde"] = df_pag2.apply(
-                lambda r: max(0, (pd.Timestamp(r["fecha_pago"]).date() - pd.Timestamp(r["fecha_vencimiento"]).date()).days), axis=1
-            )
-            df_tarde = df_pag2[df_pag2["_dias_tarde"] > 0].sort_values("_dias_tarde", ascending=False)
-
-    total_pend_p = df[df["_ev"].isin(["PENDIENTE","SIN_FACTURA","VENCIDA"])]["monto_local"].sum()
-    total_crit_p = df_crit_p["monto_local"].sum() if not df_crit_p.empty else 0
-    avg_tarde = df_tarde["_dias_tarde"].mean() if not df_tarde.empty else 0
 
     # KPIs
     c1, c2, c3, c4 = st.columns(4)
