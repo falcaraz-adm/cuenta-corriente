@@ -35,6 +35,19 @@ C_INFO    = "#0095FF"
 C_BORDER  = "#2D3348"
 C_MUTED   = "#6B7280"
 
+PAIS_MONEDA = {
+    "GUATEMALA":  ("GTQ", "gtq", "Q"),
+    "ARGENTINA":  ("ARS", "ars", "$"),
+    "URUGUAY":    ("UYU", "uyu", "$U"),
+    "CHILE":      ("CLP", "clp", "$"),
+    "PARAGUAY":   ("PYG", "pyg", "₲"),
+    "BOLIVIA":    ("BOB", "bob", "Bs."),
+    "AXT":        ("USD", "usd", "$"),
+    "CANOA":      ("USD", "usd", "$"),
+    "NAVEGANTES": ("USD", "usd", "$"),
+    "TODOS":      ("USD", "usd", "$"),
+}
+
 COUNTRY_THEMES = {
     "TODOS":      {"primary": "#6C63FF", "secondary": "#4B4899", "flag": "🌎", "name": "Todos"},
     "GUATEMALA":  {"primary": "#4B9CD3", "secondary": "#0F4C81", "flag": "🇬🇹", "name": "Guatemala"},
@@ -179,17 +192,25 @@ def _extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
-def _get_tipo_cambio(fecha_str: str) -> tuple[float, str]:
+def _get_tipo_cambio(fecha_str: str, moneda_code: str = "gtq") -> tuple[float, str]:
     """
-    Devuelve (tipo_cambio_gtq_por_usd, fuente).
-    Consulta la API gratuita de fawazahmed0 para la fecha indicada.
+    Devuelve (unidades_moneda_local_por_1_USD, fuente).
+    moneda_code: código ISO en minúsculas (gtq, ars, uyu, clp, pyg, bob, usd).
+    Si moneda_code="usd" devuelve (1.0, ...) sin consulta.
     """
     import urllib.request, json as _json
+
+    if moneda_code.lower() == "usd":
+        return 1.0, "USD — sin conversión necesaria"
+
     fecha_fmt = "latest"
     try:
         fecha_fmt = pd.Timestamp(fecha_str).strftime("%Y-%m-%d")
     except Exception:
         pass
+
+    FALLBACKS = {"gtq": 7.75, "ars": 1200.0, "uyu": 42.0,
+                 "clp": 960.0, "pyg": 7800.0, "bob": 6.91}
 
     for url in [
         f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{fecha_fmt}/v1/currencies/usd.json",
@@ -198,13 +219,14 @@ def _get_tipo_cambio(fecha_str: str) -> tuple[float, str]:
         try:
             with urllib.request.urlopen(url, timeout=6) as resp:
                 data = _json.loads(resp.read())
-            rate = data.get("usd", {}).get("gtq")
+            rate = data.get("usd", {}).get(moneda_code.lower())
             if rate and float(rate) > 0:
-                fuente = f"Tipo de cambio {data.get('date', fecha_fmt)}"
-                return float(rate), fuente
+                return float(rate), f"TC oficial {data.get('date', fecha_fmt)} · 1 USD = {float(rate):,.4f} {moneda_code.upper()}"
         except Exception:
             continue
-    return 7.75, "Tipo de cambio estimado (sin conexión)"
+
+    fallback = FALLBACKS.get(moneda_code.lower(), 1.0)
+    return fallback, f"TC estimado (sin conexión) · 1 USD ≈ {fallback:,.2f} {moneda_code.upper()}"
 
 
 def _ocr_factura_ia(file_bytes: bytes, filename: str, tipo: str = "proveedor") -> dict:
@@ -461,29 +483,38 @@ def _prov_nueva_entrada():
                 if "error" in resultado:
                     st.error(f"❌ {resultado['error']}")
                 else:
-                    # Conversión automática GTQ → USD
-                    monto = float(resultado.get("monto") or 0)
-                    moneda = resultado.get("moneda", "GTQ")
-                    fecha_fac = resultado.get("fecha_emision") or datetime.date.today().isoformat()
-                    if monto > 0 and moneda == "GTQ":
-                        with st.spinner("Buscando tipo de cambio oficial..."):
-                            tc, tc_fuente = _get_tipo_cambio(fecha_fac)
+                    # Conversión automática moneda local → USD según país
+                    monto      = float(resultado.get("monto") or 0)
+                    fecha_fac  = resultado.get("fecha_emision") or datetime.date.today().isoformat()
+                    pais_actual = st.session_state.get("pais_filtro_global", "GUATEMALA")
+                    _, moneda_code, simbolo = PAIS_MONEDA.get(pais_actual, ("GTQ", "gtq", "Q"))
+                    resultado["_moneda_code"] = moneda_code
+                    resultado["_simbolo"]     = simbolo
+                    if monto > 0 and moneda_code != "usd":
+                        with st.spinner(f"Buscando tipo de cambio oficial ({moneda_code.upper()}/USD)..."):
+                            tc, tc_fuente = _get_tipo_cambio(fecha_fac, moneda_code)
                         resultado["_tc"]        = tc
                         resultado["_tc_fuente"] = tc_fuente
                         resultado["_monto_usd"] = round(monto / tc, 2)
+                    elif moneda_code == "usd":
+                        resultado["_tc"]        = 1.0
+                        resultado["_tc_fuente"] = "USD — sin conversión"
+                        resultado["_monto_usd"] = monto
                     st.session_state["prov_ocr"] = resultado
                     st.success("✅ Datos extraídos — revisá y editá si es necesario.")
                     st.rerun()
         ocr = st.session_state.get("prov_ocr", {})
         if ocr:
             with st.expander("📋 Datos extraídos por la IA", expanded=True):
+                _sim = ocr.get("_simbolo", "Q")
+                _mc  = ocr.get("_moneda_code", "gtq").upper()
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Proveedor", ocr.get("nombre") or "—")
-                c2.metric("Monto GTQ", f"Q {ocr.get('monto') or 0:,.2f}")
+                c2.metric(f"Monto {_mc}", f"{_sim} {ocr.get('monto') or 0:,.2f}")
                 c3.metric("Equivalente USD", f"$ {ocr.get('_monto_usd') or 0:,.2f}")
                 c4.metric("N° Factura", ocr.get("numero_factura") or "—")
-                if ocr.get("_tc"):
-                    st.caption(f"💱 {ocr.get('_tc_fuente','')} · Q {ocr['_tc']:.4f} por USD")
+                if ocr.get("_tc_fuente"):
+                    st.caption(f"💱 {ocr.get('_tc_fuente','')}")
 
     if modo.endswith("(la factura llega después)"):
         st.info("**Modo sin factura:** Cuando llegue la factura, editá este registro para completar los datos.")
@@ -512,8 +543,13 @@ def _prov_nueva_entrada():
         with c3:
             monto_gtq = st.number_input("Monto GTQ *", min_value=0.0, value=_def_monto, step=100.0, format="%.2f")
         with c4:
+            _tc_label = ""
+            if ocr.get("_tc") and ocr.get("_moneda_code", "usd") != "usd":
+                _mc_lbl = ocr.get("_moneda_code","").upper()
+                _sim_lbl = ocr.get("_simbolo","")
+                _tc_label = f" (TC: {_sim_lbl}{ocr['_tc']:,.4f} por USD)"
             monto_usd = st.number_input(
-                "Equivalente USD" + (f" (TC: Q {ocr['_tc']:.4f})" if ocr.get("_tc") else ""),
+                f"Equivalente USD{_tc_label}",
                 min_value=0.0, value=_def_monto_usd, step=10.0, format="%.2f"
             )
 
