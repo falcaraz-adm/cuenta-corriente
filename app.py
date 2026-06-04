@@ -17,6 +17,8 @@ st.set_page_config(
 from connector import (
     get_proveedores_cc, add_proveedor_cc, update_proveedor_cc, delete_proveedor_cc,
     get_clientes_cc,    add_cliente_cc,    update_cliente_cc,    delete_cliente_cc,
+    marcar_conciliado_proveedor, marcar_conciliado_cliente,
+    desmarcar_conciliado_proveedor, desmarcar_conciliado_cliente,
 )
 
 # ── Constantes ────────────────────────────────────────────────────────────────
@@ -1839,6 +1841,270 @@ def _render_alertas_proveedores(pais_sel, theme_color, hoy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# CONCILIADOR CON BANCO
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _extraer_movimientos_banco(file_bytes: bytes, filename: str) -> list:
+    """Usa Claude para extraer transacciones del estado de cuenta bancario."""
+    try:
+        api_key = st.secrets.get("anthropic", {}).get("api_key", "")
+        if not api_key:
+            return []
+        import anthropic, base64, json, re
+        client_ai = anthropic.Anthropic(api_key=api_key)
+        ext = filename.lower().rsplit(".", 1)[-1]
+        prompt = (
+            "Extraé TODAS las transacciones de este estado de cuenta bancario como JSON array. "
+            "Cada transacción debe tener:\n"
+            '[{"fecha": "YYYY-MM-DD", "docto": "número de documento", '
+            '"descripcion": "descripción", "debito": 0.00, "credito": 0.00}]\n'
+            "- debito: monto si es salida de dinero (Débito/Debe), sino 0\n"
+            "- credito: monto si es entrada de dinero (Crédito/Haber), sino 0\n"
+            "- Incluí TODAS las filas de transacciones, sin omitir ninguna\n"
+            "- Las fechas pueden estar en formato DD-MM-YYYY, convertí a YYYY-MM-DD\n"
+            "Respondé SOLO con el JSON array, sin texto adicional."
+        )
+        if ext == "pdf":
+            texto = _extract_pdf_text(file_bytes)
+            if texto:
+                resp = client_ai.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=4000,
+                    messages=[{"role": "user", "content": f"{prompt}\n\nEstado de cuenta:\n{texto}"}]
+                )
+            else:
+                b64 = base64.standard_b64encode(file_bytes).decode()
+                resp = client_ai.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=4000,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+                        {"type": "text", "text": prompt}
+                    ]}]
+                )
+        else:
+            mt = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/jpeg")
+            b64 = base64.standard_b64encode(file_bytes).decode()
+            resp = client_ai.messages.create(
+                model="claude-haiku-4-5-20251001", max_tokens=4000,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": mt, "data": b64}},
+                    {"type": "text", "text": prompt}
+                ]}]
+            )
+        raw = resp.content[0].text.strip()
+        m = re.search(r'\[.*\]', raw, re.DOTALL)
+        return json.loads(m.group()) if m else []
+    except Exception as e:
+        st.error(f"Error extrayendo movimientos: {e}")
+        return []
+
+
+def _buscar_match(monto: float, fecha_str: str, df_registros: pd.DataFrame,
+                  col_monto: str, col_fecha: str, tolerancia_dias: int = 3) -> dict | None:
+    """Busca un registro que coincida por monto exacto y fecha ±tolerancia_dias."""
+    if df_registros.empty or monto <= 0:
+        return None
+    try:
+        fecha = pd.Timestamp(fecha_str).date()
+    except Exception:
+        return None
+    for _, row in df_registros.iterrows():
+        rm = float(row.get(col_monto) or 0)
+        rf_raw = row.get(col_fecha)
+        if not pd.notna(rf_raw):
+            continue
+        try:
+            rf = pd.Timestamp(rf_raw).date()
+        except Exception:
+            continue
+        if abs(rm - monto) < 0.02 and abs((rf - fecha).days) <= tolerancia_dias:
+            return row.to_dict()
+    return None
+
+
+def _render_conciliacion(pais_sel, theme_color):
+    tc = st.session_state.get("tc", theme_color)
+
+    st.markdown(
+        f"<div style='background:linear-gradient(90deg,{tc}22,transparent);border-left:4px solid {tc};"
+        "border-radius:8px;padding:.6rem 1rem;margin-bottom:1rem;font-size:.85rem;color:#A0A4B8;'>"
+        "Subí el PDF del estado de cuenta bancario. La IA extrae los movimientos y busca coincidencias "
+        "contra tus pagos a proveedores y cobros de clientes.</div>",
+        unsafe_allow_html=True
+    )
+
+    # ── Configuración ─────────────────────────────────────────────────────────
+    with st.expander("⚙️ Opciones de conciliación", expanded=False):
+        tol = st.number_input("Tolerancia de días para coincidencia de fecha", min_value=0, max_value=10, value=3, key="conc_tol")
+    tol = st.session_state.get("conc_tol", 3)
+
+    # ── Upload del PDF bancario ───────────────────────────────────────────────
+    pdf_banco = st.file_uploader(
+        "📄 Estado de cuenta bancario (PDF o imagen)",
+        type=["pdf", "jpg", "jpeg", "png"],
+        key="conc_banco_file"
+    )
+
+    if pdf_banco:
+        col_ext, col_info = st.columns([1, 3])
+        with col_ext:
+            if st.button("🤖 Extraer movimientos", type="primary", key="conc_extraer_btn"):
+                with st.spinner("Leyendo estado de cuenta con IA..."):
+                    movs = _extraer_movimientos_banco(pdf_banco.read(), pdf_banco.name)
+                if movs:
+                    st.session_state["conc_movimientos"] = movs
+                    st.success(f"✅ {len(movs)} movimientos extraídos.")
+                    st.rerun()
+                else:
+                    st.error("No se pudieron extraer movimientos. Verificá que el PDF tenga texto seleccionable.")
+        with col_info:
+            movs_guardados = st.session_state.get("conc_movimientos", [])
+            if movs_guardados:
+                st.caption(f"📊 {len(movs_guardados)} movimientos listos para conciliar · {pdf_banco.name}")
+
+    movimientos = st.session_state.get("conc_movimientos", [])
+    if not movimientos:
+        return
+
+    # ── Cargar registros de la app ────────────────────────────────────────────
+    df_prov = get_proveedores_cc()
+    df_cli  = get_clientes_cc()
+
+    if pais_sel != "TODOS":
+        if not df_prov.empty and "pais" in df_prov.columns:
+            df_prov = df_prov[df_prov["pais"] == pais_sel]
+        if not df_cli.empty and "pais" in df_cli.columns:
+            df_cli = df_cli[df_cli["pais"] == pais_sel]
+
+    df_prov_pag = df_prov[df_prov["estado"] == "PAGADA"].copy() if not df_prov.empty else pd.DataFrame()
+    df_cli_cob  = df_cli[df_cli["estado"] == "COBRADA"].copy()  if not df_cli.empty  else pd.DataFrame()
+
+    # ── Botón conciliar ───────────────────────────────────────────────────────
+    if st.button("🔄 Conciliar automáticamente", type="primary", key="conc_auto_btn"):
+        with st.spinner("Buscando coincidencias..."):
+            resultados = []
+            for mov in movimientos:
+                debito  = float(mov.get("debito")  or 0)
+                credito = float(mov.get("credito") or 0)
+                fecha   = mov.get("fecha", "")
+                match   = None
+                tipo_match = None
+
+                if debito > 0:
+                    match = _buscar_match(debito, fecha, df_prov_pag, "monto_local", "fecha_pago", tol)
+                    if match:
+                        tipo_match = "PROVEEDOR"
+                if credito > 0 and not match:
+                    match = _buscar_match(credito, fecha, df_cli_cob, "monto_local", "fecha_cobro", tol)
+                    if match:
+                        tipo_match = "CLIENTE"
+
+                resultados.append({**mov, "_match": match, "_tipo": tipo_match})
+
+            st.session_state["conc_resultados"] = resultados
+        conc = sum(1 for r in resultados if r["_match"])
+        st.success(f"✅ Conciliados: **{conc}** de {len(resultados)} movimientos.")
+        st.rerun()
+
+    resultados = st.session_state.get("conc_resultados", [])
+    if not resultados:
+        # Mostrar movimientos extraídos sin conciliar todavía
+        st.markdown(f"<div style='color:{tc};font-weight:700;font-size:.8rem;letter-spacing:1px;text-transform:uppercase;margin:1rem 0 .5rem;'>📋 Movimientos extraídos ({len(movimientos)})</div>", unsafe_allow_html=True)
+        for mov in movimientos:
+            deb = float(mov.get("debito") or 0)
+            cre = float(mov.get("credito") or 0)
+            monto_str = f"Q {deb:,.2f} (débito)" if deb > 0 else f"Q {cre:,.2f} (crédito)"
+            color_mov = C_DANGER if deb > 0 else C_SUCCESS
+            st.markdown(
+                f"<div style='background:#1A1F2E;border-left:3px solid {color_mov}44;"
+                "border-radius:6px;padding:.5rem 1rem;margin-bottom:.3rem;font-size:.82rem;"
+                "display:flex;justify-content:space-between;'>"
+                f"<span style='color:#A0A4B8;'>{mov.get('fecha','')} · {mov.get('docto','')} · {mov.get('descripcion','')}</span>"
+                f"<span style='font-weight:700;color:{color_mov};'>{monto_str}</span>"
+                "</div>",
+                unsafe_allow_html=True
+            )
+        return
+
+    # ── Mostrar resultados ────────────────────────────────────────────────────
+    conciliados   = [r for r in resultados if r["_match"]]
+    sin_conciliar = [r for r in resultados if not r["_match"]]
+
+    # KPIs resumen
+    total_deb_conc = sum(float(r.get("debito") or 0) for r in conciliados)
+    total_cre_conc = sum(float(r.get("credito") or 0) for r in conciliados)
+    total_deb_sin  = sum(float(r.get("debito") or 0) for r in sin_conciliar)
+    total_cre_sin  = sum(float(r.get("credito") or 0) for r in sin_conciliar)
+
+    c1, c2, c3, c4 = st.columns(4)
+    _kpi_card(c1, "Conciliados",      str(len(conciliados)),   f"Q {total_deb_conc+total_cre_conc:,.2f}", C_SUCCESS)
+    _kpi_card(c2, "Sin conciliar",    str(len(sin_conciliar)), f"Q {total_deb_sin+total_cre_sin:,.2f}",   C_WARNING)
+    _kpi_card(c3, "Total débitos",    f"Q {sum(float(r.get('debito') or 0) for r in resultados):,.2f}", str(len(resultados)) + " mov.", C_DANGER)
+    _kpi_card(c4, "Total créditos",   f"Q {sum(float(r.get('credito') or 0) for r in resultados):,.2f}", "del banco", C_SUCCESS)
+
+    st.markdown("")
+
+    # Conciliados
+    if conciliados:
+        st.markdown(f"<div style='color:{C_SUCCESS};font-weight:700;font-size:.78rem;letter-spacing:1px;text-transform:uppercase;margin:.5rem 0 .4rem;'>✅ Conciliados ({len(conciliados)})</div>", unsafe_allow_html=True)
+        for r in conciliados:
+            m     = r["_match"]
+            deb   = float(r.get("debito") or 0)
+            cre   = float(r.get("credito") or 0)
+            es_db = deb > 0
+            nombre = _safe(m.get("proveedor") if r["_tipo"] == "PROVEEDOR" else m.get("cliente"))
+            fac    = _safe(m.get("numero_factura") or "S/N")
+            ref_id = f"Banco:{r.get('docto','')}|App:{m.get('id','')}"
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,{C_SUCCESS}12 0%,#1A1F2E 100%);"
+                f"border-left:4px solid {C_SUCCESS};border-radius:8px;padding:.7rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
+                "<div style='flex:1;'>"
+                f"<div style='font-size:.82rem;color:#FAFAFA;font-weight:600;'>"
+                f"{r.get('fecha','')} · <span style='color:#A0A4B8;'>Doc {r.get('docto','')}</span> · {r.get('descripcion','')}</div>"
+                f"<div style='font-size:.75rem;color:{C_SUCCESS};margin-top:3px;'>"
+                f"↔ {r['_tipo']}: <b>{nombre}</b> · Fac {fac}</div>"
+                "</div>"
+                f"<div style='font-weight:800;color:{'"+C_DANGER+"' if es_db else C_SUCCESS};white-space:nowrap;'>"
+                f"{'−' if es_db else '+'} Q {deb if es_db else cre:,.2f}</div>"
+                "</div></div>",
+                unsafe_allow_html=True
+            )
+            if m.get("id"):
+                btn_key = f"conc_guardar_{r.get('docto','')}{m.get('id','')}"
+                if st.button(f"💾 Guardar conciliación en app", key=btn_key):
+                    if r["_tipo"] == "PROVEEDOR":
+                        marcar_conciliado_proveedor(int(m["id"]), ref_id)
+                    else:
+                        marcar_conciliado_cliente(int(m["id"]), ref_id)
+                    st.success("✅ Guardado.")
+
+    # Sin conciliar
+    if sin_conciliar:
+        st.markdown(f"<div style='color:{C_WARNING};font-weight:700;font-size:.78rem;letter-spacing:1px;text-transform:uppercase;margin:1rem 0 .4rem;'>⚠️ Sin conciliar ({len(sin_conciliar)})</div>", unsafe_allow_html=True)
+        for r in sin_conciliar:
+            deb = float(r.get("debito") or 0)
+            cre = float(r.get("credito") or 0)
+            es_db = deb > 0
+            st.markdown(
+                f"<div style='background:linear-gradient(135deg,{C_WARNING}10 0%,#1A1F2E 100%);"
+                f"border-left:4px solid {C_WARNING}66;border-radius:8px;padding:.7rem 1.1rem;margin-bottom:.4rem;'>"
+                "<div style='display:flex;justify-content:space-between;align-items:center;gap:1rem;'>"
+                f"<div style='flex:1;font-size:.82rem;color:#A0A4B8;'>"
+                f"{r.get('fecha','')} · Doc {r.get('docto','')} · {r.get('descripcion','')}</div>"
+                f"<div style='font-weight:700;color:{C_WARNING};white-space:nowrap;'>"
+                f"{'−' if es_db else '+'} Q {deb if es_db else cre:,.2f}</div>"
+                "</div></div>",
+                unsafe_allow_html=True
+            )
+
+    st.markdown("---")
+    if st.button("🗑 Limpiar y cargar nuevo estado de cuenta", key="conc_limpiar"):
+        st.session_state.pop("conc_movimientos", None)
+        st.session_state.pop("conc_resultados", None)
+        st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1938,13 +2204,17 @@ def main():
         unsafe_allow_html=True
     )
 
-    tab_prov, tab_cli, tab_alertas = st.tabs(["🏢 Proveedores", "👥 Clientes", "🔔 Alertas & Cobranza"])
+    tab_prov, tab_cli, tab_alertas, tab_conc = st.tabs([
+        "🏢 Proveedores", "👥 Clientes", "🔔 Alertas & Cobranza", "🔄 Conciliador"
+    ])
     with tab_prov:
         _render_proveedores(pais_sel, color)
     with tab_cli:
         _render_clientes(pais_sel, color)
     with tab_alertas:
         _render_alertas(pais_sel, color)
+    with tab_conc:
+        _render_conciliacion(pais_sel, color)
 
 
 if __name__ == "__main__":

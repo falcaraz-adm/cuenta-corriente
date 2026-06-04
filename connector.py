@@ -132,3 +132,47 @@ def delete_cliente_cc(entry_id: int) -> bool:
     except Exception as e:
         print(f"Error delete cliente_cc: {e}")
         return False
+
+
+# ── Conciliación ──────────────────────────────────────────────────────────────
+
+def marcar_conciliado_proveedor(entry_id: int, ref: str) -> bool:
+    try:
+        _sb().table("proveedores_cc").update({
+            "conciliado": True, "conciliacion_ref": ref
+        }).eq("id", entry_id).execute()
+        return True
+    except Exception as e:
+        print(f"Error marcar_conciliado_proveedor: {e}")
+        return False
+
+
+def marcar_conciliado_cliente(entry_id: int, ref: str) -> bool:
+    try:
+        _sb().table("clientes_cc").update({
+            "conciliado": True, "conciliacion_ref": ref
+        }).eq("id", entry_id).execute()
+        return True
+    except Exception as e:
+        print(f"Error marcar_conciliado_cliente: {e}")
+        return False
+
+
+def desmarcar_conciliado_proveedor(entry_id: int) -> bool:
+    try:
+        _sb().table("proveedores_cc").update({
+            "conciliado": False, "conciliacion_ref": None
+        }).eq("id", entry_id).execute()
+        return True
+    except Exception as e:
+        return False
+
+
+def desmarcar_conciliado_cliente(entry_id: int) -> bool:
+    try:
+        _sb().table("clientes_cc").update({
+            "conciliado": False, "conciliacion_ref": None
+        }).eq("id", entry_id).execute()
+        return True
+    except Exception as e:
+        return False
