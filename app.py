@@ -186,12 +186,20 @@ def _ocr_factura_ia(file_bytes: bytes, filename: str) -> dict:
         client_ai = anthropic.Anthropic(api_key=api_key)
         ext = filename.lower().rsplit(".", 1)[-1]
         prompt = (
-            "Analizá esta factura y extraé los datos en JSON con estas claves exactas:\n"
-            '{"nombre": "empresa o persona que emite", "numero_factura": "número", '
-            '"monto": 0.00, "moneda": "GTQ", '
-            '"fecha_emision": "YYYY-MM-DD", "fecha_vencimiento": "YYYY-MM-DD", '
-            '"descripcion": "descripción del servicio"}\n'
-            "Si un dato no aparece usá null. Respondé SOLO con el JSON."
+            "Esta factura fue RECIBIDA por AGENCIA PROA GUATEMALA (es el receptor/comprador). "
+            "Necesito los datos del EMISOR (quien envía la factura, el proveedor), NO de PROA Guatemala.\n\n"
+            "Extraé en JSON con estas claves exactas:\n"
+            '{"nombre": "nombre completo del EMISOR/proveedor (quien emite, no PROA)", '
+            '"numero_factura": "número de DTE o serie-número de autorización", '
+            '"monto": 0.00, '
+            '"moneda": "GTQ", '
+            '"fecha_emision": "YYYY-MM-DD", '
+            '"fecha_vencimiento": "YYYY-MM-DD o null si no aparece explícitamente", '
+            '"descripcion": "descripción breve del servicio o producto"}\n\n'
+            "Importante: el campo 'nombre' debe ser el PROVEEDOR que cobra (ej: '3B SOLUCIONES EMPRESARIALES' "
+            "o 'ALTERNATIVAS FINANCIERAS CM'), nunca AGENCIA PROA GUATEMALA.\n"
+            "Si fecha_vencimiento no aparece en la factura, usá null.\n"
+            "Respondé SOLO con el JSON válido, sin texto adicional."
         )
         if ext == "pdf":
             texto = _extract_pdf_text(file_bytes)
@@ -1667,8 +1675,61 @@ def _render_alertas_proveedores(pais_sel, theme_color, hoy):
     dias_crit = st.session_state.get("alerta_dias_crit", 0)
     dest_text = st.session_state.get("alerta_destinatarios", "falcaraz@proaconsulting.com.ar")
 
+    # Demo data para preview
+    hoy_ts = pd.Timestamp(hoy)
+    _demo_p = pd.DataFrame([
+        {"proveedor": "3B SOLUCIONES EMPRESARIALES", "numero_factura": "65E20D18-455363674",
+         "monto_local": 899.75, "fecha_vencimiento": hoy_ts - pd.Timedelta(days=12),
+         "fecha_pago": None, "estado": "PENDIENTE", "pais": "GUATEMALA"},
+        {"proveedor": "ALTERNATIVAS FINANCIERAS CM", "numero_factura": "096A2C40-1439974598",
+         "monto_local": 5000.0, "fecha_vencimiento": hoy_ts - pd.Timedelta(days=5),
+         "fecha_pago": None, "estado": "PENDIENTE", "pais": "GUATEMALA"},
+        {"proveedor": "HUMAND NAVEGANTES", "numero_factura": "HN-2026-042",
+         "monto_local": 12500.0, "fecha_vencimiento": hoy_ts + pd.Timedelta(days=3),
+         "fecha_pago": None, "estado": "PENDIENTE", "pais": "GUATEMALA"},
+        {"proveedor": "SERVICIOS LEGALES GT", "numero_factura": "SL-2026-018",
+         "monto_local": 3200.0, "fecha_vencimiento": hoy_ts - pd.Timedelta(days=20),
+         "fecha_pago": hoy_ts - pd.Timedelta(days=10), "estado": "PAGADA", "pais": "GUATEMALA",
+         "_dias_tarde": 10},
+    ])
+    _demo_p["_ev"] = _demo_p.apply(lambda r: "PAGADA" if r["estado"] == "PAGADA" else "PENDIENTE", axis=1)
+    _demo_p["_alerta_est"] = _demo_p.apply(lambda r: _estado_alerta(r, hoy, dias_prev, dias_crit)[0], axis=1)
+    _demo_p["_alerta_dias"] = _demo_p.apply(lambda r: _estado_alerta(r, hoy, dias_prev, dias_crit)[1], axis=1)
+    _demo_p_crit  = _demo_p[_demo_p["_alerta_est"] == "CRITICA"]
+    _demo_p_prev  = _demo_p[_demo_p["_alerta_est"] == "PREVENTIVA"]
+    _demo_p_tarde = _demo_p[_demo_p["_ev"] == "PAGADA"].copy()
+    if not _demo_p_tarde.empty and "_dias_tarde" not in _demo_p_tarde.columns:
+        _demo_p_tarde["_dias_tarde"] = 0
+    _demo_p_res = {
+        "total_pend": _demo_p[_demo_p["estado"] != "PAGADA"]["monto_local"].sum(),
+        "n_criticas": len(_demo_p_crit), "n_prev": len(_demo_p_prev), "n_tarde": len(_demo_p_tarde),
+    }
+
+    col_prev_p, col_test_p, _ = st.columns([1, 1, 2])
+    with col_prev_p:
+        mostrar_preview_p = st.toggle("👁 Ver preview email", key="toggle_preview_prov")
+    with col_test_p:
+        if st.button("📧 Enviar email de prueba", key="btn_test_prov"):
+            dests = [d.strip() for d in dest_text.strip().splitlines() if d.strip()]
+            if not dests:
+                st.error("Agregá al menos un destinatario en ⚙️ Configuración (tab Clientes).")
+            else:
+                html_test_p = _generar_html_email_proveedores(_demo_p_crit, _demo_p_prev, _demo_p_tarde, _demo_p_res)
+                with st.spinner("Enviando email de prueba..."):
+                    ok, msg = _enviar_email(html_test_p, dests)
+                if ok:
+                    st.success(f"✅ Email de prueba enviado a: {', '.join(dests)}")
+                else:
+                    st.error(f"❌ {msg}")
+
+    if mostrar_preview_p:
+        html_prev_p = _generar_html_email_proveedores(_demo_p_crit, _demo_p_prev, _demo_p_tarde, _demo_p_res)
+        with st.expander("📄 Vista previa del email de pagos (datos de ejemplo)", expanded=True):
+            st.components.v1.html(html_prev_p, height=650, scrolling=True)
+        st.markdown("")
+
     if df.empty:
-        st.info("No hay facturas de proveedores registradas.")
+        st.info("💡 No hay facturas de proveedores cargadas aún. El preview muestra cómo se verá con datos reales.")
         return
 
     df["_ev"] = df.apply(lambda r: _estado_visual_prov(r, hoy), axis=1)
